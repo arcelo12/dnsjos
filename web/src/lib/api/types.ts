@@ -595,6 +595,8 @@ export interface BlocklistBuild {
   size_bytes: number
   sha256: string
   error: string
+  added: number
+  removed: number
 }
 
 export interface BlocklistLookup {
@@ -604,6 +606,17 @@ export interface BlocklistLookup {
   /** An active allowlist entry covers the name/IP; blocked may still be true until the next build. */
   allowed: boolean
   allow_entry: AllowEntry | null
+  /** When match was last added; null when it predates change tracking. */
+  blocked_since: string | null
+  history: BlocklistChange[] // the name and its parents, newest first
+}
+
+/** A name entering (added) or leaving the blocklist in a build. */
+export interface BlocklistChange {
+  build_id: number
+  name: string
+  added: boolean
+  at: string // the build's finish time
 }
 
 /** SPEC §7.5: names/IPs never blocked (list mistakes such as shared CDN space). */

@@ -286,6 +286,8 @@ type BlocklistBuild struct {
 	SizeBytes   int64      `json:"size_bytes"`
 	SHA256      string     `json:"sha256"`
 	Error       string     `json:"error"`
+	Added       int        `json:"added"`   // entries new since the previous ok build
+	Removed     int        `json:"removed"` // entries gone since the previous ok build
 }
 
 type BlocklistLookup struct {
@@ -296,6 +298,17 @@ type BlocklistLookup struct {
 	// the entry is newer than the current build; nodes enforce the allowlist anyway).
 	Allowed    bool        `json:"allowed"`
 	AllowEntry *AllowEntry `json:"allow_entry"`
+	// BlockedSince: when match was last added (nil when it predates change tracking).
+	BlockedSince *time.Time        `json:"blocked_since"`
+	History      []BlocklistChange `json:"history"` // name and its parents, newest first
+}
+
+// BlocklistChange is one name entering (added) or leaving the blocklist in a build.
+type BlocklistChange struct {
+	BuildID int64     `json:"build_id"`
+	Name    string    `json:"name"`
+	Added   bool      `json:"added"`
+	At      time.Time `json:"at"` // the build's finish time
 }
 
 type BlockedReport struct {

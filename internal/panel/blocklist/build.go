@@ -69,12 +69,12 @@ func isURLKind(k string) bool {
 func isDomainKind(k string) bool { return strings.HasSuffix(k, "_domains") }
 func isIPKind(k string) bool     { return strings.HasSuffix(k, "_ips") }
 
-const buildCols = "id, started_at, finished_at, status, trigger, domains, ips, whitelisted, skipped, size_bytes, sha256, error"
+const buildCols = "id, started_at, finished_at, status, trigger, domains, ips, whitelisted, skipped, size_bytes, sha256, error, added, removed"
 
 func scanBuild(row pgx.Row) (api.BlocklistBuild, error) {
 	var b api.BlocklistBuild
 	err := row.Scan(&b.ID, &b.StartedAt, &b.FinishedAt, &b.Status, &b.Trigger, &b.Domains, &b.IPs,
-		&b.Whitelisted, &b.Skipped, &b.SizeBytes, &b.SHA256, &b.Error)
+		&b.Whitelisted, &b.Skipped, &b.SizeBytes, &b.SHA256, &b.Error, &b.Added, &b.Removed)
 	return b, err
 }
 
@@ -141,6 +141,8 @@ func (s *Service) insert(ctx context.Context, trigger string) (api.BlocklistBuil
 type result struct {
 	status                             string // ok | skipped
 	domains, ips, whitelisted, skipped int
+	added, removed                     int             // versus the previous ok build
+	changes                            map[string]bool // name → added
 	size                               int64
 	sha                                string
 	entries                            map[string]int // per source id
@@ -158,9 +160,10 @@ func (s *Service) execute(ctx context.Context, id int64, force bool) (api.Blockl
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	b, err := scanBuild(s.d.Pool.QueryRow(wctx, `UPDATE blocklist_builds SET finished_at = now(), status = $2,
-		domains = $3, ips = $4, whitelisted = $5, skipped = $6, size_bytes = $7, sha256 = $8, error = $9
+		domains = $3, ips = $4, whitelisted = $5, skipped = $6, size_bytes = $7, sha256 = $8, error = $9,
+		added = $10, removed = $11
 		WHERE id = $1 RETURNING `+buildCols,
-		id, status, res.domains, res.ips, res.whitelisted, res.skipped, res.size, res.sha, msg))
+		id, status, res.domains, res.ips, res.whitelisted, res.skipped, res.size, res.sha, msg, res.added, res.removed))
 	if err != nil {
 		return b, err
 	}
@@ -169,6 +172,9 @@ func (s *Service) execute(ctx context.Context, id int64, force bool) (api.Blockl
 			if _, err := s.d.Pool.Exec(wctx, "UPDATE blocklist_sources SET entries = $2 WHERE id = $1", sid, n); err != nil {
 				return b, err
 			}
+		}
+		if err := s.saveChanges(wctx, id, res.changes); err != nil {
+			s.d.Log.Warn("blocklist changes", "id", id, "err", err) // history only; the build stands
 		}
 		if err := os.WriteFile(filepath.Join(s.dir, "inputs.fp"), []byte(res.fingerprint), 0o644); err != nil {
 			return b, err
@@ -220,9 +226,11 @@ func (s *Service) build(ctx context.Context, force bool) (res result, err error)
 		return res, err
 	}
 	res.fingerprint = s.fingerprint(srcs, al.Version)
-	if cur, err := Current(ctx, s.d.Pool); err != nil {
+	cur, err := Current(ctx, s.d.Pool)
+	if err != nil {
 		return res, err
-	} else if cur != nil {
+	}
+	if cur != nil {
 		old, _ := os.ReadFile(filepath.Join(s.dir, "inputs.fp"))
 		if _, err := os.Stat(s.artifact(cur.SHA256)); err == nil && string(old) == res.fingerprint && !force {
 			res.status = "skipped"
@@ -293,6 +301,14 @@ func (s *Service) build(ctx context.Context, force bool) (res result, err error)
 		return res, err
 	}
 	syncDir(s.dir)
+	if cur != nil && cur.SHA256 != res.sha {
+		// Informational only: a missing/pruned previous artifact must not fail the build.
+		if d, err := diffCDB(s.artifact(cur.SHA256), s.artifact(res.sha)); err != nil {
+			s.d.Log.Warn("blocklist diff", "prev", cur.SHA256, "err", err)
+		} else {
+			res.added, res.removed, res.changes = d.added, d.removed, d.names
+		}
+	}
 	res.status = "ok"
 	return res, nil
 }
@@ -375,6 +391,18 @@ func writeCDB(ctx context.Context, f *os.File, inputs []input, wl map[string]str
 		return st, err
 	}
 	return st, f.Sync()
+}
+
+func (s *Service) saveChanges(ctx context.Context, id int64, changes map[string]bool) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	rows := make([][]any, 0, len(changes))
+	for name, added := range changes {
+		rows = append(rows, []any{id, name, added})
+	}
+	_, err := s.d.Pool.CopyFrom(ctx, pgx.Identifier{"blocklist_changes"}, []string{"build_id", "name", "added"}, pgx.CopyFromRows(rows))
+	return err
 }
 
 // fetch downloads a URL source to its raw file. changed=false on 304 (the previous
