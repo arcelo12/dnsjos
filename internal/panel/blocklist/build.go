@@ -2,6 +2,8 @@ package blocklist
 
 import (
 	"bufio"
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -413,13 +415,17 @@ func (s *Service) fetch(ctx context.Context, src source, force bool) (changed bo
 	start := time.Now()
 	var n int64
 	streams := 1
+	same := false // a 200 whose body equals the file we already hold
 	defer func() {
 		took := time.Since(start)
 		status := fmt.Sprintf("not modified (%d ms)", took.Milliseconds())
 		if err != nil {
 			status = "error: " + err.Error()
-		} else if changed {
+		} else if changed || same {
 			status = fetchStatus(n, took, streams)
+			if same {
+				status += ", content unchanged"
+			}
 			s.d.Log.Info("blocklist fetch", "source", src.ID, "bytes", n, "seconds", took.Seconds(),
 				"mb_per_s", float64(n)/1e6/took.Seconds(), "streams", streams)
 		}
@@ -451,8 +457,16 @@ func (s *Service) fetch(ctx context.Context, src source, force bool) (changed bo
 	tmp := path + ".tmp"
 	var etag, lastMod string
 	n, streams, etag, lastMod, err = s.download(ctx, resp, src.URL, tmp, s.d.Settings.Get().BlocklistDownloadSegments)
-	if err == nil {
+	if err == nil && haveFile {
+		same, err = sameFile(tmp, path)
+	}
+	if err == nil && !same {
+		// Keeping the old file (and its mtime) on identical content leaves the fingerprint
+		// alone, so the build is skipped instead of rebuilding the same CDB.
 		err = os.Rename(tmp, path)
+	}
+	if same {
+		os.Remove(tmp)
 	}
 	if err != nil {
 		os.Remove(tmp)
@@ -460,7 +474,42 @@ func (s *Service) fetch(ctx context.Context, src source, force bool) (changed bo
 	}
 	_, err = s.d.Pool.Exec(ctx, "UPDATE blocklist_sources SET etag = $2, last_modified = $3 WHERE id = $1",
 		src.ID, etag, lastMod)
-	return err == nil, err
+	return err == nil && !same, err
+}
+
+// sameFile reports whether a and b have identical contents.
+func sameFile(a, b string) (bool, error) {
+	fa, err := os.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer fa.Close()
+	fb, err := os.Open(b)
+	if err != nil {
+		return false, err
+	}
+	defer fb.Close()
+	sa, err := fa.Stat()
+	if err != nil {
+		return false, err
+	}
+	if sb, err := fb.Stat(); err != nil || sa.Size() != sb.Size() {
+		return false, err
+	}
+	bufA, bufB := make([]byte, 1<<20), make([]byte, 1<<20)
+	for {
+		na, errA := io.ReadFull(fa, bufA)
+		nb, errB := io.ReadFull(fb, bufB)
+		if !bytes.Equal(bufA[:na], bufB[:nb]) {
+			return false, nil
+		}
+		if errA == io.EOF || errA == io.ErrUnexpectedEOF { // equal sizes: b ends here too
+			return true, nil
+		}
+		if err := cmp.Or(errA, errB); err != nil {
+			return false, err
+		}
+	}
 }
 
 // fingerprint identifies the build inputs: raw files by size+mtime (a 200 rewrites

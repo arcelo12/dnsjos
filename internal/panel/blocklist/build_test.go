@@ -126,6 +126,15 @@ func TestBuildFlow(t *testing.T) {
 
 	build("skipped") // everything 304, nothing else changed
 
+	// A 200 with a new ETag but the same body keeps the old file, so the build is skipped too.
+	domains.set(`"d1b"`, "a.com\nb.com\nc.com\n")
+	build("skipped")
+	var same string
+	if err := pool.QueryRow(ctx, "SELECT last_status FROM blocklist_sources WHERE kind = 'trustpositif_domains'").Scan(&same); err != nil ||
+		!strings.HasSuffix(same, "content unchanged") {
+		t.Fatalf("identical 200 status: %q %v", same, err)
+	}
+
 	// force: full re-download (no conditional request) and a rebuild despite unchanged inputs.
 	hits, n304 := domains.hits, domains.n304
 	fb, err := s.insert(ctx, "manual")
