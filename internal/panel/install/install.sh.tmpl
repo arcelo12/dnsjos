@@ -1,6 +1,6 @@
 #!/bin/sh
 # DnsJos node installer (SPEC §13), served by the panel at /install.sh.
-#   curl -fsSL {{.PanelURL}}/install.sh | sudo sh -s -- --token TOKEN [--panel URL] [--adopt] [--no-start]
+#   curl -fsSL {{.PanelURL}}/install.sh | sudo sh -s -- --token TOKEN [--panel URL] [--adopt] [--no-start] [--with-unbound]
 # Idempotent: safe to re-run. Supports Debian 12/13 and Ubuntu 22.04/24.04 on amd64/arm64.
 set -eu
 
@@ -8,6 +8,8 @@ PANEL_URL='{{.PanelURL}}'
 TOKEN=''
 ADOPT=0
 NO_START=0
+WITH_UNBOUND=0
+UNBOUND_ADDR='127.0.0.1@5335' # local recursive resolver, set as the profile upstream 127.0.0.1:5335
 DNSDIST_SERIES='20' # dnsdist 2.0.x from repo.powerdns.com
 AGENT_BIN=/usr/local/bin/dnsjos-agent
 AGENT_CONF=/etc/dnsjos/agent.json
@@ -19,12 +21,14 @@ die() { printf 'dnsjos-install: error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
 	cat <<EOF
-usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start]
+usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start] [--with-unbound]
   --token TOKEN  enrollment token from the panel (Nodes -> Add node)
   --panel URL    panel URL (default: $PANEL_URL)
   --adopt        take over a live dnsdist server: keep its dnsdist package, secrets,
                  listeners and port 53 setup (no repo, no install/upgrade, no resolved changes)
   --no-start     install the agent service but do not start it (review with 'dnsjos-agent plan')
+  --with-unbound also install Unbound as a local recursive, DNSSEC-validating resolver on
+                 127.0.0.1:5335; point the profile upstreams at it to stop forwarding to public DNS
 EOF
 }
 
@@ -36,6 +40,7 @@ while [ $# -gt 0 ]; do
 		--panel=*) PANEL_URL=${1#--panel=}; shift ;;
 		--adopt) ADOPT=1; shift ;;
 		--no-start) NO_START=1; shift ;;
+		--with-unbound) WITH_UNBOUND=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage >&2; die "unknown argument: $1" ;;
 	esac
@@ -143,6 +148,78 @@ if [ "$ADOPT" = 0 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null;
 		grep -qs '^nameserver 127\.0\.0\.53' /etc/resolv.conf; then
 		ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 	fi
+fi
+
+# ── 4b. optional Unbound recursive resolver on loopback ──────────────────────
+# Config goes in before the package so Unbound never starts on its default :53 (dnsdist's).
+if [ "$WITH_UNBOUND" = 1 ]; then
+	say "installing unbound on ${UNBOUND_ADDR%@*}:${UNBOUND_ADDR#*@}"
+	mkdir -p /etc/unbound/unbound.conf.d
+	# Sized from the host: a thread per core (power-of-two slabs to cut lock contention) and
+	# rrset cache = RAM/16 in 64m..1g, msg cache half that (Unbound uses ~2.5x the configured size).
+	UB_THREADS=$(nproc 2>/dev/null || echo 1)
+	[ "$UB_THREADS" -le 8 ] || UB_THREADS=8
+	UB_SLABS=1
+	while [ "$UB_SLABS" -lt "$UB_THREADS" ]; do UB_SLABS=$((UB_SLABS * 2)); done
+	UB_RRSET=$(awk '/^MemTotal:/ {m = int($2 / 1024 / 16); if (m < 64) m = 64; if (m > 1024) m = 1024; print m; exit}' /proc/meminfo)
+	UB_RRSET=${UB_RRSET:-128}
+	# No IPv6 default route: don't waste the first try on IPv6 name servers.
+	UB_IP6=no
+	[ -z "$(ip -6 route show default 2>/dev/null)" ] || UB_IP6=yes
+	cat >/etc/unbound/unbound.conf.d/dnsjos.conf <<EOF
+# Managed by the DnsJos installer: recursive resolver behind dnsdist, loopback only.
+# Re-run the installer with --with-unbound to resize after a CPU/RAM change.
+server:
+    interface: ${UNBOUND_ADDR}
+    access-control: 127.0.0.0/8 allow
+    do-ip6: ${UB_IP6}
+    hide-identity: yes
+    hide-version: yes
+
+    # threads and sockets
+    num-threads: ${UB_THREADS}
+    so-reuseport: yes
+    so-rcvbuf: 4m
+    so-sndbuf: 4m
+    outgoing-range: 8192
+    num-queries-per-thread: 4096
+    incoming-num-tcp: 256
+    outgoing-num-tcp: 64
+
+    # caches
+    msg-cache-slabs: ${UB_SLABS}
+    rrset-cache-slabs: ${UB_SLABS}
+    infra-cache-slabs: ${UB_SLABS}
+    key-cache-slabs: ${UB_SLABS}
+    rrset-cache-size: ${UB_RRSET}m
+    msg-cache-size: $((UB_RRSET / 2))m
+    key-cache-size: $((UB_RRSET / 8))m
+    neg-cache-size: $((UB_RRSET / 16))m
+    cache-max-negative-ttl: 300
+
+    # latency: refresh popular names before they expire, answer stale while refreshing
+    # (RFC 8767), and synthesize NXDOMAIN from cached NSEC (RFC 8198)
+    prefetch: yes
+    prefetch-key: yes
+    serve-expired: yes
+    serve-expired-ttl: 86400
+    serve-expired-client-timeout: 0
+    aggressive-nsec: yes
+    qname-minimisation: yes
+    rrset-roundrobin: yes
+    harden-below-nxdomain: yes
+EOF
+	# The package would point the host's resolv.conf at 127.0.0.1:53, where dnsdist (not Unbound) answers.
+	systemctl mask unbound-resolvconf.service >/dev/null 2>&1 || true
+	command -v unbound >/dev/null 2>&1 || {
+		apt-get update -q
+		# shellcheck disable=SC2086
+		apt-get install $APT_OPTS unbound
+	}
+	unbound-checkconf >/dev/null || die "unbound config check failed (unbound-checkconf)"
+	systemctl enable unbound >/dev/null 2>&1
+	systemctl restart unbound
+	say "unbound ready: set the profile upstream to ${UNBOUND_ADDR%@*}:${UNBOUND_ADDR#*@}"
 fi
 
 # ── 5. agent binary (sha256-verified) ───────────────────────────────────────

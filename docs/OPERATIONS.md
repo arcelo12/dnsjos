@@ -13,6 +13,11 @@ The installer installs dnsdist 2.0 from repo.powerdns.com only when dnsdist is *
 installed; an existing dnsdist is never upgraded. Add `--no-start` to review the first
 config before the agent touches dnsdist (see `plan` below).
 
+Add `--with-unbound` (or tick it in the Add node dialog) to also install Unbound as a
+local recursive, DNSSEC-validating resolver on `127.0.0.1:5335`. dnsdist keeps filtering,
+policies and routing; set the profile upstream to `127.0.0.1:5335` (weight 1) instead of
+public resolvers. Re-running the installer with the flag on an existing node is safe.
+
 ## Adopting a live dnsdist server (rolling, zero customer downtime)
 
 Live servers run dnsdist with the dnsdist_ootb YAML wrapper. Adoption keeps the dnsdist

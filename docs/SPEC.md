@@ -852,6 +852,11 @@ POSIX sh, idempotent, Debian 12/13 and Ubuntu 22.04/24.04, amd64/arm64:
    install `dnsdist`; disable systemd-resolved stub listener if it holds :53.
 3. download `/dl/agent/linux/<arch>` → `/usr/local/bin/dnsjos-agent` (verify sha256 from
    `/dl/agent/linux/<arch>.sha256`).
+   With `--with-unbound` also install Unbound (distro package) as a loopback-only recursive,
+   DNSSEC-validating resolver on `127.0.0.1:5335` (config written before the package so it
+   never binds :53; `unbound-resolvconf` masked). Tuned from the host: a thread per core (max 8),
+   rrset cache RAM/16 (64m–1g), prefetch, serve-expired (RFC 8767), aggressive NSEC, IPv6
+   only with a v6 default route. Profiles use it as upstream `127.0.0.1:5335`.
 4. `dnsjos-agent enroll --panel P --token T`, install `dnsjos-agent.service`, enable+start.
 5. print node name and panel URL.
 Never touches an existing `/etc/dnsdist` without backing it up first.
