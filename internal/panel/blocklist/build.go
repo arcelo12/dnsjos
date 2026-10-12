@@ -71,7 +71,7 @@ func isURLKind(k string) bool {
 func isDomainKind(k string) bool { return strings.HasSuffix(k, "_domains") }
 func isIPKind(k string) bool     { return strings.HasSuffix(k, "_ips") }
 
-const buildCols = `b.id, b.profile_id::text, coalesce(p.name, ''), b.started_at, b.finished_at, b.status, b.trigger, b.domains, b.ips, b.whitelisted, b.skipped, b.size_bytes, b.sha256, b.error, b.added, b.removed`
+const buildCols = `b.id, coalesce(b.profile_id::text, ''), coalesce(p.name, ''), b.started_at, b.finished_at, b.status, b.trigger, b.domains, b.ips, b.whitelisted, b.skipped, b.size_bytes, b.sha256, b.error, b.added, b.removed`
 
 // buildFrom joins the owning profile so a build row carries its name. Every query that
 // selects buildCols must use this FROM.
