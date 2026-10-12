@@ -98,6 +98,12 @@ export interface DualStack {
   exclude: string[] // names + subdomains never touched
 }
 
+/** SPEC §6.10: dnsdist sets the CD bit so upstreams (Unbound, public resolvers) skip DNSSEC validation. */
+export interface DNSSEC {
+  disable_validation: boolean // CD on every query
+  exclude: string[] // names + subdomains answered without validation (negative trust anchors)
+}
+
 /** SPEC §6.9: smartdns speed test (shared with dual-stack) and fastest-IP answers. */
 export interface SpeedCheck {
   mode: string // speed-check-mode: "ping,tcp:80,tcp:443" | "none" | …
@@ -152,6 +158,7 @@ export interface ConfigSpec {
   cgk: CGK
   speed_check: SpeedCheck
   dualstack: DualStack
+  dnssec: DNSSEC
   tuning: Tuning
   webserver: Webserver
   analytics: Analytics

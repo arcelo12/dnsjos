@@ -11,6 +11,7 @@ import { fmtBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { TABS, tabOf, useFieldErrors, useReadOnly, type TabId } from './context'
 import { ListEditor, NumField, Section, SwitchField, TextField } from './fields'
+import { ServfailSuggestions } from './ServfailSuggestions'
 import { UpstreamsEditor } from './UpstreamsEditor'
 import { isCIDR, isHostname, isIPPort } from './validate'
 
@@ -54,7 +55,7 @@ export function ConfigForm({
   const errTabs = new Set(Object.keys(errors).map(tabOf))
 
   const { do53, doh, dot, tls } = s.listen
-  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds, speed_check: sc } = s
+  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds, speed_check: sc, dnssec: dn } = s
 
   return (
     <Tabs value={tab} onValueChange={(t) => onTabChange(t as TabId)} className="gap-4">
@@ -367,6 +368,28 @@ export function ConfigForm({
             what="domain"
             help="Names (and their subdomains) whose answers are never dropped (domain-rules -dualstack-ip-selection no)."
           />
+        </Section>
+      </TabsContent>
+
+      <TabsContent value="dnssec" className="grid gap-4">
+        <Section
+          title="DNSSEC validation"
+          description="Validation is done by the upstream resolver (Unbound or a public resolver), not by dnsdist. Turning it off makes dnsdist set the CD (checking disabled) bit on every query, so upstreams return answers they would otherwise reject as bogus with SERVFAIL."
+          enabled={!dn.disable_validation}
+          onEnabledChange={(on) => part('dnssec', { disable_validation: !on })}
+        >
+          <ListEditor
+            label="Exceptions"
+            path="dnssec.exclude"
+            value={dn.exclude}
+            onChange={(exclude) => part('dnssec', { exclude })}
+            validate={isHostname}
+            what="domain"
+            help="Names (and their subdomains) answered without validation, for zones whose DNSSEC is broken (negative trust anchors). One suffix covers a whole tree: go.id covers every *.go.id."
+          />
+          {!ro && !dn.disable_validation && (
+            <ServfailSuggestions exclude={dn.exclude} onAdd={(name) => part('dnssec', { exclude: [...dn.exclude, name] })} />
+          )}
         </Section>
       </TabsContent>
 

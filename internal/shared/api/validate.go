@@ -173,6 +173,7 @@ func (s ConfigSpec) Validate() error {
 	hostnames("speed_check.exclude", s.SpeedCheck.Exclude)
 	between("dualstack.threshold_ms", s.DualStack.ThresholdMs, 0, 1000)
 	hostnames("dualstack.exclude", s.DualStack.Exclude)
+	hostnames("dnssec.exclude", s.DNSSEC.Exclude)
 
 	between("tuning.udp_buffer_bytes", s.Tuning.UDPBufferBytes, 0, 1<<30)
 	between("tuning.tcp_workers", s.Tuning.TCPWorkers, 0, 1024)

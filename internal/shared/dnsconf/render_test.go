@@ -52,6 +52,15 @@ func TestGolden(t *testing.T) {
 			s.Cache.Enabled = false
 			s.Analytics.Enabled = false
 		},
+		"dnssec_off": func(s *api.ConfigSpec) {
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.DNSSEC.DisableValidation = true
+			s.DNSSEC.Exclude = []string{"ignored.example"} // validation is off for everything anyway
+		},
+		"dnssec_exclude": func(s *api.ConfigSpec) {
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.DNSSEC.Exclude = []string{"go.id", "Broken.Example.", "broken.example"}
+		},
 		"analytics_sampled": func(s *api.ConfigSpec) {
 			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled = false, false, false
 			s.Analytics.SampleRate, s.Analytics.StreamAddr = 10, "[::1]:6101"

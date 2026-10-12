@@ -226,6 +226,10 @@ panel on save and in the agent before rendering.
     "allow_force_aaaa": false,                       // also drop A when IPv6 is faster
     "exclude": []                                    // names + subdomains never touched
   },
+  "dnssec": {                       // §6.10: zero value = validate everything
+    "disable_validation": false,                     // CD bit on every query
+    "exclude": []                                    // names + subdomains sent with CD (NTAs)
+  },
   "tuning": {"udp_buffer_bytes": 16777216, "tcp_workers": 0, "extra_lua": ""},
   "webserver": {"listen": "127.0.0.1:8083", "prometheus_acl": ["127.0.0.1/32"]},
   "analytics": {"enabled": true, "sample_rate": 1, "top_k": 5000, "stream_addr": "127.0.0.1:6001"}  // §19
@@ -518,6 +522,20 @@ smartdns' speed test (`speed-check-mode`) and the answer it builds from it. Pack
   ("name ip time …", 0.1 ms, -1 = no answer). `fipReload()` flushes the cached answers of
   every added, changed or removed name, since cache hits are not rebuilt. Metrics:
   `fastest-ip-rewrites`, `fastest-ip-names`.
+
+### 6.10 DNSSEC validation switch
+
+dnsdist does not validate DNSSEC; the upstreams do (Unbound from `install.sh
+--with-unbound`, or a public resolver). The profile controls it through the CD
+(checking disabled) bit, so nothing on the node besides dnsdist is managed:
+* `disable_validation`: `addAction(AllRule(), SetDisableValidationAction())`, every
+  query goes upstream with CD and bogus answers are returned instead of SERVFAIL.
+* otherwise `exclude` (lowercased, deduplicated) becomes a SuffixMatchNode with the same
+  action: negative trust anchors (RFC 7646) for zones with broken DNSSEC; `go.id` covers
+  every `*.go.id`.
+CD is set before the packet cache lookup and is part of the cache key, so validated and
+unvalidated answers never mix. The profile editor lists the top SERVFAIL names of the last
+7 days (§19) with one-click add and a DNSViz link: not every SERVFAIL is DNSSEC.
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 

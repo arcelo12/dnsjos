@@ -19,6 +19,7 @@ type ConfigSpec struct {
 	CGK        CGK        `json:"cgk"`
 	SpeedCheck SpeedCheck `json:"speed_check"`
 	DualStack  DualStack  `json:"dualstack"`
+	DNSSEC     DNSSEC     `json:"dnssec"`
 	Tuning     Tuning     `json:"tuning"`
 	Webserver  Webserver  `json:"webserver"`
 	Analytics  Analytics  `json:"analytics"`
@@ -125,6 +126,18 @@ type DualStack struct {
 	// Also drop A answers when IPv6 is faster (dualstack-ip-allow-force-AAAA).
 	AllowForceAAAA bool `json:"allow_force_aaaa"`
 	// Names (and their subdomains) never touched (domain-rules -dualstack-ip-selection no).
+	Exclude []string `json:"exclude"`
+}
+
+// DNSSEC controls validation by the upstream resolvers (SPEC §6.10). dnsdist does not
+// validate: it sets the CD (checking disabled) bit so Unbound or a public resolver returns
+// answers it would otherwise SERVFAIL as bogus. The zero value validates everything, which
+// is also what specs stored before this section existed decode to.
+type DNSSEC struct {
+	// CD on every query: upstreams skip validation entirely.
+	DisableValidation bool `json:"disable_validation"`
+	// Names (and their subdomains) answered without validation, e.g. a zone with broken
+	// DNSSEC (a negative trust anchor, RFC 7646). "go.id" covers every *.go.id.
 	Exclude []string `json:"exclude"`
 }
 
@@ -265,6 +278,7 @@ func DefaultConfigSpec() ConfigSpec {
 		},
 		SpeedCheck: SpeedCheck{Mode: DefaultSpeedCheckMode, MaxReplyIPNum: 8, Exclude: []string{}}, // fastest_ip opt-in
 		DualStack:  DualStack{ThresholdMs: 10, Exclude: []string{}},                                // opt-in: see DualStack
+		DNSSEC:     DNSSEC{Exclude: []string{}},
 		Tuning:     Tuning{UDPBufferBytes: 16777216},
 		Webserver:  Webserver{Listen: "127.0.0.1:8083", PrometheusACL: []string{"127.0.0.1/32"}},
 		Analytics:  DefaultAnalytics(),

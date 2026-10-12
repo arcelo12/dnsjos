@@ -180,6 +180,23 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 		w("setServerPolicy(%s)\n", spec.Upstreams.Policy) // identifier from a fixed allowlist
 	}
 
+	// CD is set before the packet cache lookup and is part of its key, so validated and
+	// unvalidated answers for a name are cached apart.
+	if d := spec.DNSSEC; d.DisableValidation {
+		c.WriteString("\n-- DNSSEC validation off: upstreams answer with CD (checking disabled).\n" +
+			"addAction(AllRule(), SetDisableValidationAction(), {name = \"dnsjos-dnssec-off\"})\n")
+	} else if len(d.Exclude) > 0 {
+		names := make([]string, len(d.Exclude))
+		for i, e := range d.Exclude {
+			names[i] = strings.ToLower(strings.TrimSuffix(e, "."))
+		}
+		slices.Sort(names)
+		w("\n-- DNSSEC exceptions (negative trust anchors): these names and their subdomains get CD.\n"+
+			"local dnssecExclude = newSuffixMatchNode()\nfor _, n in ipairs(%s) do dnssecExclude:add(newDNSName(n)) end\n"+
+			"addAction(SuffixMatchNodeRule(dnssecExclude, true), SetDisableValidationAction(), {name = \"dnsjos-dnssec-exclude\"})\n",
+			luaList(slices.Compact(names)))
+	}
+
 	module := func(rel string, body []byte) {
 		files[rel] = body
 		w("dofile(%s)\n", luaString(path.Join(rt.BaseDir, rel)))
