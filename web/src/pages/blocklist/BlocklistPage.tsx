@@ -28,13 +28,14 @@ import {
   qk,
   useBlocklistChanges,
   useBlocklistLookup,
+  useBlocklistProfiles,
   useBlocklistSources,
   useBuildNow,
   useCreateSource,
   useDeleteSource,
   useUpdateSource,
 } from '@/lib/api/client'
-import type { BlocklistBuild, BlocklistLookup, BlocklistSource, BlocklistSourceKind } from '@/lib/api/types'
+import type { BlocklistBuild, BlocklistLookup, BlocklistProfile, BlocklistSource, BlocklistSourceCreate, BlocklistSourceKind, BlocklistSourcePatch } from '@/lib/api/types'
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, shortSha } from '@/lib/format'
 import { cn, looksLikeIP } from '@/lib/utils'
 
@@ -51,20 +52,30 @@ const KINDS: Record<BlocklistSourceKind, string> = {
 }
 const isManual = (k: BlocklistSourceKind) => k === 'manual_domains' || k === 'manual_ips' || k === 'whitelist'
 
+/** Sentinel for "all scopes". The global scope is a real empty string, so the selector needs
+ * a distinct sentinel for it too (Radix Select forbids an empty item value). */
+const ALL = '__all__'
+const GLOBAL = '__global__'
+/** Maps the selector's sentinel space to the API scope: undefined all, '' global, else profile. */
+const scopeFor = (sel: string) => (sel === ALL ? undefined : sel === GLOBAL ? '' : sel)
+/** The selector value for an API scope. */
+const selectFor = (scope: string | undefined) => (scope === undefined ? ALL : scope === '' ? GLOBAL : scope)
+const ownSources = (s: BlocklistSource, profileId: string) => s.profile_id === profileId
+
 const buildDuration = (b: BlocklistBuild) =>
   b.finished_at ? fmtDuration((new Date(b.finished_at).getTime() - new Date(b.started_at).getTime()) / 1000) : '—'
 
 /** Builds + current poll every 2 s while a build is running, otherwise every 10 s. */
-function useBuildState() {
+function useBuildState(profileId?: string) {
   const builds = useQuery({
-    queryKey: qk.blocklistBuilds,
-    queryFn: api.blocklist.builds,
+    queryKey: qk.blocklistBuilds(profileId),
+    queryFn: () => api.blocklist.builds(profileId),
     refetchInterval: (q) => (q.state.data?.items.some((b) => b.status === 'running') ? 2_000 : 10_000),
   })
   const running = builds.data?.items.some((b) => b.status === 'running') ?? false
   const current = useQuery({
-    queryKey: qk.blocklistCurrent,
-    queryFn: api.blocklist.current,
+    queryKey: qk.blocklistCurrent(profileId),
+    queryFn: () => api.blocklist.current(profileId),
     refetchInterval: running ? 2_000 : 10_000,
   })
   // A build rewrites each source's entries / last fetch / status. Refetch sources whenever the newest build
@@ -73,21 +84,41 @@ function useBuildState() {
   const newest = builds.data?.items[0]
   const newestKey = newest && `${newest.id}:${newest.status}`
   useEffect(() => {
-    if (newestKey) void qc.invalidateQueries({ queryKey: qk.blocklistSources })
+    if (newestKey) void qc.invalidateQueries({ queryKey: ['blocklist', 'sources'] })
   }, [qc, newestKey])
   return { builds, current, running }
 }
 
 export default function BlocklistPage() {
-  const { builds, current, running } = useBuildState()
+  // The selector works in sentinel space (ALL / GLOBAL / a profile id): Radix Select rejects
+  // an empty-string item value, but "" is a real scope. scopeFor() maps back to the API scope.
+  const [selected, setSelected] = useState<string>(ALL)
+  const profiles = useBlocklistProfiles()
+  const scope: string | undefined = scopeFor(selected)
+  const profile = scope !== undefined && scope !== '' ? profiles.data?.items.find((p) => p.id === scope) : undefined
+  const { builds, current, running } = useBuildState(scope)
   const buildNow = useBuildNow()
   const busy = running || buildNow.isPending
   const [changesOf, setChangesOf] = useState<BlocklistBuild | null>(null)
+  const runBuild = (force: boolean) =>
+    buildNow.mutate(
+      { force, profileId: scope },
+      {
+        onSuccess: (b) =>
+          toast.success(
+            force
+              ? `Forced build #${b.id} started (full re-download)${b.profile_id ? ` for ${b.profile_name || b.profile_id}` : ''}`
+              : `Build #${b.id} started${b.profile_id ? ` for ${b.profile_name || b.profile_id}` : ''}`,
+          ),
+        onError: toastError,
+      },
+    )
+  const scopeLabel = scope === undefined ? 'All profiles' : scope === '' ? 'Global (shared)' : (profile?.name ?? scope)
   return (
     <>
       <PageHeader
         title="Blocklist"
-        description="TrustPositif and custom lists, built once into a CDB file that every node downloads."
+        description="TrustPositif and custom lists, built once per profile into a CDB file that the profile's nodes download."
         actions={
           <RequireAdmin>
             <div className="flex flex-wrap gap-2">
@@ -95,42 +126,41 @@ export default function BlocklistPage() {
                 variant="outline"
                 disabled={busy}
                 title="Ignore cached copies: download every source again and rebuild (useful to measure download speed)"
-                onClick={() =>
-                  buildNow.mutate(true, {
-                    onSuccess: (b) => toast.success(`Forced build #${b.id} started (full re-download)`),
-                    onError: toastError,
-                  })
-                }
+                onClick={() => runBuild(true)}
               >
                 <LuRefreshCw className={busy ? 'animate-spin' : undefined} />
                 Force re-download
               </Button>
-              <Button
-                disabled={busy}
-                onClick={() =>
-                  buildNow.mutate(false, {
-                    onSuccess: (b) => toast.success(`Build #${b.id} started`),
-                    onError: toastError,
-                  })
-                }
-              >
+              <Button disabled={busy} onClick={() => runBuild(false)}>
                 <LuHammer className={busy ? 'animate-pulse' : undefined} />
-                {busy ? 'Building…' : 'Build now'}
+                {busy ? 'Building…' : `Build now · ${scopeLabel}`}
               </Button>
             </div>
           </RequireAdmin>
         }
       />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <CurrentBuildCard build={current.data} loading={current.isPending} running={running} />
+        <CurrentBuildCard build={current.data} loading={current.isPending} running={running} scope={scope} />
         <LookupCard />
       </div>
+      <ProfilesCard
+        profiles={profiles.data?.items}
+        loading={profiles.isPending}
+        error={profiles.error}
+        selected={selected}
+        onSelect={setSelected}
+      />
       <AllowlistCard />
-      <SourcesCard />
+      <SourcesCard scope={scope} profile={profile} />
       <Card>
-        <CardHeader>
-          <CardTitle>Build history</CardTitle>
-          <CardDescription>Newest first. The newest successful build is the one nodes download.</CardDescription>
+        <CardHeader className="flex flex-row items-start justify-between gap-2">
+          <div className="space-y-1.5">
+            <CardTitle>Build history</CardTitle>
+            <CardDescription>
+              Newest first. The newest successful build is the one nodes on this scope download.
+            </CardDescription>
+          </div>
+          <ScopeSelect selected={selected} onSelect={setSelected} profiles={profiles.data?.items} id="builds-scope" />
         </CardHeader>
         <CardContent>
           <DataTable
@@ -146,6 +176,125 @@ export default function BlocklistPage() {
       </Card>
       {changesOf && <ChangesDialog build={changesOf} onClose={() => setChangesOf(null)} />}
     </>
+  )
+}
+
+/** Scope picker: All profiles / Global (shared) / each config profile. */
+function ScopeSelect({
+  selected,
+  onSelect,
+  profiles,
+  id,
+  className,
+}: {
+  selected: string
+  onSelect: (scope: string) => void
+  profiles: BlocklistProfile[] | undefined
+  id: string
+  className?: string
+}) {
+  return (
+    <Select value={selected} onValueChange={onSelect}>
+      <SelectTrigger id={id} className={cn('w-56', className)} aria-label="Blocklist scope">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={ALL}>All profiles</SelectItem>
+        <SelectItem value={GLOBAL}>Global (shared)</SelectItem>
+        {profiles?.map((p) => (
+          <SelectItem key={p.id} value={p.id}>
+            {p.name}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+/** Every config profile with its blocklist scope, so an operator can jump into a profile's scope. */
+function ProfilesCard({
+  profiles,
+  loading,
+  error,
+  selected,
+  onSelect,
+}: {
+  profiles: BlocklistProfile[] | undefined
+  loading: boolean
+  error: Error | null
+  selected: string
+  onSelect: (scope: string) => void
+}) {
+  const columns: Column<BlocklistProfile>[] = [
+    {
+      key: 'name',
+      header: 'Profile',
+      sortValue: (p) => p.name,
+      cell: (p) => (
+        <div className="min-w-0">
+          <div className="font-medium">{p.name}</div>
+          {p.description && <div className="max-w-80 truncate text-xs text-muted-foreground">{p.description}</div>}
+        </div>
+      ),
+    },
+    { key: 'sources', header: 'Sources', align: 'right', sortValue: (p) => p.source_count, cell: (p) => fmtNumber(p.source_count) },
+    {
+      key: 'build',
+      header: 'Build',
+      sortValue: (p) => p.own_build?.id ?? -1,
+      cell: (p) =>
+        p.own_build ? (
+          <span className="flex items-center gap-2">
+            <StatusBadge status={p.own_build.status} />
+            <span className="text-xs text-muted-foreground">#{p.own_build.id}</span>
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">No own build</span>
+        ),
+    },
+    {
+      key: 'served',
+      header: 'Served',
+      cell: (p) =>
+        p.uses_global ? (
+          <Badge variant="secondary">Global build</Badge>
+        ) : p.effective_build ? (
+          <Badge variant="outline">Own build</Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground">Nothing yet</span>
+        ),
+    },
+    {
+      key: 'manage',
+      header: '',
+      align: 'right',
+      cell: (p) => (
+        <Button variant="ghost" size="sm" disabled={selected === p.id} onClick={() => onSelect(p.id)}>
+          {selected === p.id ? 'Selected' : 'Manage'}
+        </Button>
+      ),
+    },
+  ]
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Profiles</CardTitle>
+        <CardDescription>
+          Each config profile can have its own sources and build; profiles without an own build are served the global one.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <DataTable
+          columns={columns}
+          rows={profiles}
+          loading={loading}
+          error={error}
+          rowKey={(p) => p.id}
+          defaultSort={{ key: 'name' }}
+          empty={<EmptyState title="No profiles" description="Create a config profile to give it its own blocklist." />}
+        />
+      </CardContent>
+    </Card>
   )
 }
 
@@ -249,13 +398,27 @@ function Stat({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-function CurrentBuildCard({ build, loading, running }: { build: BlocklistBuild | null | undefined; loading: boolean; running: boolean }) {
+function CurrentBuildCard({
+  build,
+  loading,
+  running,
+  scope,
+}: {
+  build: BlocklistBuild | null | undefined
+  loading: boolean
+  running: boolean
+  scope: string | undefined
+}) {
+  const scopeLabel = scope === undefined ? 'all scopes' : scope === '' ? 'the global scope' : `profile ${build?.profile_name || scope}`
   return (
     <Card className="lg:col-span-2">
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           Current build
           {build && <StatusBadge status={build.status} />}
+          {(build?.profile_id || running) && (
+            <Badge variant="outline">{build?.profile_id ? build.profile_name || build.profile_id : 'all scopes'}</Badge>
+          )}
           {running && <StatusBadge status="running" label="new build running" />}
         </CardTitle>
         <CardDescription>
@@ -264,7 +427,7 @@ function CurrentBuildCard({ build, loading, running }: { build: BlocklistBuild |
               #{build.id} · built <TimeAgo date={build.finished_at ?? build.started_at} /> · {build.trigger}
             </>
           ) : (
-            'What nodes are serving right now.'
+            `What nodes download right now for ${scopeLabel}.`
           )}
         </CardDescription>
       </CardHeader>
@@ -272,7 +435,11 @@ function CurrentBuildCard({ build, loading, running }: { build: BlocklistBuild |
         {loading ? (
           <Skeleton className="h-20 w-full" />
         ) : !build ? (
-          <EmptyState icon={LuShieldBan} title="No blocklist published yet" description="Nodes block nothing until the first build succeeds." />
+          <EmptyState
+            icon={LuShieldBan}
+            title="No blocklist published yet"
+            description={`Nodes on ${scopeLabel} block nothing until a build here succeeds.`}
+          />
         ) : (
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -446,12 +613,13 @@ function LookupResult({ r, onAllow }: { r: BlocklistLookup; onAllow: () => void 
   )
 }
 
-function SourcesCard() {
+function SourcesCard({ scope, profile }: { scope: string | undefined; profile: BlocklistProfile | undefined }) {
   const { isAdmin } = useAuth()
-  const { data, isPending, error } = useBlocklistSources()
+  const { data, isPending, error } = useBlocklistSources(scope)
   const update = useUpdateSource()
   const remove = useDeleteSource()
   const [editing, setEditing] = useState<BlocklistSource | 'new' | null>(null)
+  const profileName = (id: string) => id || 'Global'
 
   const columns: Column<BlocklistSource>[] = [
     {
@@ -460,7 +628,10 @@ function SourcesCard() {
       sortValue: (s) => s.name,
       cell: (s) => (
         <div className="min-w-0">
-          <div className="font-medium">{s.name}</div>
+          <div className="flex items-center gap-2">
+            <span className="font-medium">{s.name}</span>
+            {scope !== undefined && !ownSources(s, scope) && <Badge variant="secondary">inherited from global</Badge>}
+          </div>
           <div className="max-w-80 truncate text-xs text-muted-foreground" title={s.url}>
             {isManual(s.kind) ? 'Manual list' : s.url}
           </div>
@@ -472,6 +643,14 @@ function SourcesCard() {
       header: 'Kind',
       sortValue: (s) => s.kind,
       cell: (s) => <Badge variant={s.kind === 'whitelist' ? 'secondary' : 'outline'}>{KINDS[s.kind]}</Badge>,
+    },
+    {
+      key: 'profile',
+      header: 'Profile',
+      sortValue: (s) => s.profile_id,
+      cell: (s) => (
+        <span className={s.profile_id ? undefined : 'text-muted-foreground'}>{profileName(s.profile_id)}</span>
+      ),
     },
     { key: 'entries', header: 'Entries', align: 'right', sortValue: (s) => s.entries, cell: (s) => fmtNumber(s.entries) },
     { key: 'fetch', header: 'Last fetch', sortValue: (s) => s.last_fetch_at, cell: (s) => (isManual(s.kind) ? '—' : <TimeAgo date={s.last_fetch_at} />) },
@@ -536,14 +715,23 @@ function SourcesCard() {
       <CardHeader className="flex flex-row items-start justify-between gap-2">
         <div className="space-y-1.5">
           <CardTitle>Sources</CardTitle>
-          <CardDescription>Every enabled source goes into each build; whitelist entries (and their subdomains) are removed.</CardDescription>
+          <CardDescription>
+            Every enabled source goes into the build; whitelist entries (and their subdomains) are removed.
+            {profile &&
+              (profile.uses_global
+                ? ' This profile has no own build yet, so it is served the global one.'
+                : ' This profile is served its own build.')}
+          </CardDescription>
         </div>
-        <RequireAdmin>
-          <Button size="sm" onClick={() => setEditing('new')}>
-            <LuPlus />
-            Add source
-          </Button>
-        </RequireAdmin>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge variant="outline">{scope === undefined ? 'All profiles' : scope === '' ? 'Global (shared)' : (profile?.name ?? scope)}</Badge>
+          <RequireAdmin>
+            <Button size="sm" onClick={() => setEditing('new')}>
+              <LuPlus />
+              Add source
+            </Button>
+          </RequireAdmin>
+        </div>
       </CardHeader>
       <CardContent>
         <DataTable
@@ -556,17 +744,21 @@ function SourcesCard() {
           empty={<EmptyState title="No sources" description="Add TrustPositif, a URL list or a manual list." />}
         />
       </CardContent>
-      {editing && <SourceDialog source={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
+      {editing && <SourceDialog source={editing === 'new' ? null : editing} profileId={scope} onClose={() => setEditing(null)} />}
     </Card>
   )
 }
 
-function SourceDialog({ source, onClose }: { source: BlocklistSource | null; onClose: () => void }) {
+function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource | null; profileId: string | undefined; onClose: () => void }) {
+  const profiles = useBlocklistProfiles()
   const [name, setName] = useState(source?.name ?? '')
   const [kind, setKind] = useState<BlocklistSourceKind>(source?.kind ?? 'url_domains')
   const [url, setUrl] = useState(source?.url ?? '')
   const [content, setContent] = useState(source?.content ?? '')
   const [enabled, setEnabled] = useState(source?.enabled ?? true)
+  // The dialog works in sentinel space (ALL / GLOBAL / a profile id). ALL only appears when the
+  // page filter is "all profiles", meaning "don't send profile_id, let the source be global".
+  const [profile, setProfile] = useState(source ? (source.profile_id === '' ? GLOBAL : source.profile_id) : selectFor(profileId))
   const create = useCreateSource()
   const update = useUpdateSource()
   const manual = isManual(kind)
@@ -581,9 +773,20 @@ function SourceDialog({ source, onClose }: { source: BlocklistSource | null; onC
       },
       onError: toastError,
     }
-    const body = { name: name.trim(), url: manual ? '' : url.trim(), content: manual ? content : '', enabled }
+    // A profile move is a scoped change the API treats specially (it clears the cached
+    // validators), so only send profile_id when it actually differs from the source's own.
+    const scope = scopeFor(profile)
+    const moved = source ? scope !== source.profile_id : scope !== undefined
+    const body: BlocklistSourceCreate & BlocklistSourcePatch = {
+      name: name.trim(),
+      kind,
+      url: manual ? '' : url.trim(),
+      content: manual ? content : '',
+      enabled,
+    }
+    if (moved) body.profile_id = scope ?? ''
     if (source) update.mutate({ id: source.id, patch: body }, done)
-    else create.mutate({ ...body, kind }, done)
+    else create.mutate(body, done)
   }
 
   const lines = manual ? content.split('\n').filter((l) => l.trim() && !l.trim().startsWith('#')).length : 0
@@ -596,6 +799,25 @@ function SourceDialog({ source, onClose }: { source: BlocklistSource | null; onC
         <form onSubmit={submit} className="grid gap-4">
           <Field id="src-name" label="Name">
             <Input id="src-name" value={name} onChange={(e) => setName(e.target.value)} required />
+          </Field>
+          <Field
+            id="src-profile"
+            label="Profile"
+            hint={source ? 'Moving the source changes which profile builds it — the current build keeps it until the next one.' : 'Global sources are shared by every profile that has no own build.'}
+          >
+            <Select value={profile} onValueChange={setProfile}>
+              <SelectTrigger id="src-profile" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={GLOBAL}>Global (shared by every profile)</SelectItem>
+                {profiles.data?.items.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
           <Field id="src-kind" label="Kind" hint={source ? 'The kind cannot be changed after creation.' : undefined}>
             <Select value={kind} onValueChange={(v) => setKind(v as BlocklistSourceKind)} disabled={!!source}>
