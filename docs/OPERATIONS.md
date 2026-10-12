@@ -18,6 +18,11 @@ local recursive, DNSSEC-validating resolver on `127.0.0.1:5335`. dnsdist keeps f
 policies and routing; set the profile upstream to `127.0.0.1:5335` (weight 1) instead of
 public resolvers. Re-running the installer with the flag on an existing node is safe.
 
+The installer also tunes the kernel and NIC for DNS (`/etc/sysctl.d/91-dnsjos-tuning.conf`,
+`dnsjos-nic-tuning.service`, `/etc/tmpfiles.d/dnsjos-tuning.conf`); it never lowers a value
+an operator already raised. On a VM whose NIC has a single queue (`ethtool -l`), ask the
+provider for multiqueue virtio (`queues=<vCPUs>`): software RPS works, the NIC does it cheaper.
+
 ## Adopting a live dnsdist server (rolling, zero customer downtime)
 
 Live servers run dnsdist with the dnsdist_ootb YAML wrapper. Adoption keeps the dnsdist

@@ -875,6 +875,11 @@ POSIX sh, idempotent, Debian 12/13 and Ubuntu 22.04/24.04, amd64/arm64:
    never binds :53; `unbound-resolvconf` masked). Tuned from the host: a thread per core (max 8),
    rrset cache RAM/16 (64m–1g), prefetch, serve-expired (RFC 8767), aggressive NSEC, IPv6
    only when a ping over IPv6 reaches the internet (a route alone can be a dead uplink). Profiles use it as upstream `127.0.0.1:5335`.
+   Kernel/NIC tuning (`/etc/sysctl.d/91-dnsjos-tuning.conf`, never lowering a value already
+   raised): backlog ≥ 16384, source ports 10000–65535 (unless a TCP service listens in
+   10000–32767), swappiness 10, fq + bbr, THP madvise, `performance` governor on bare metal.
+   `dnsjos-nic-tuning.service` hashes UDP on ports too (multi-queue NICs) or enables RPS/RFS
+   over every CPU (single-queue NICs, common on VMs).
 4. `dnsjos-agent enroll --panel P --token T`, install `dnsjos-agent.service`, enable+start.
 5. print node name and panel URL.
 Never touches an existing `/etc/dnsdist` without backing it up first.

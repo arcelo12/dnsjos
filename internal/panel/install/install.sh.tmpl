@@ -135,6 +135,93 @@ net.core.wmem_max = 16777216
 EOF
 sysctl -q -p /etc/sysctl.d/90-dnsjos.conf >/dev/null 2>&1 || true
 
+# DNS server tuning. Never lowers a value an operator already raised (90-dns.conf etc.).
+say "tuning the kernel and NIC for DNS"
+BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || echo 0)
+[ "$BACKLOG" -ge 16384 ] || BACKLOG=16384
+PORT_LO=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null | awk '{print $1}')
+# A wider source port range only when no TCP service listens inside the ports it adds.
+WIDE_PORTS=1
+if [ "$PORT_LO" != 10000 ] &&
+	ss -Hltn 2>/dev/null | awk '{n = split($4, a, ":"); p = a[n] + 0; if (p >= 10000 && p < 32768) bad = 1} END {exit !bad}'; then
+	WIDE_PORTS=0
+fi
+{
+	echo "# DnsJos DNS node tuning, written by install.sh."
+	echo "net.core.netdev_max_backlog = $BACKLOG"
+	if [ "$WIDE_PORTS" = 1 ]; then
+		echo "# More source ports for recursive queries (spoofing resistance)."
+		echo "net.ipv4.ip_local_port_range = 10000 65535"
+	fi
+	echo "# Keep the dnsdist and Unbound caches in RAM."
+	echo "vm.swappiness = 10"
+	echo "# RFS for single-queue NICs (dnsjos-nic-tuning.service)."
+	echo "net.core.rps_sock_flow_entries = 32768"
+	if modprobe tcp_bbr 2>/dev/null; then
+		echo "# DoH/DoT over lossy/mobile links."
+		echo "net.core.default_qdisc = fq"
+		echo "net.ipv4.tcp_congestion_control = bbr"
+	fi
+} >/etc/sysctl.d/91-dnsjos-tuning.conf
+if grep -q '= bbr' /etc/sysctl.d/91-dnsjos-tuning.conf; then echo tcp_bbr >/etc/modules-load.d/dnsjos-bbr.conf; fi
+sysctl -q -p /etc/sysctl.d/91-dnsjos-tuning.conf >/dev/null 2>&1 || true
+# Transparent huge pages: madvise (no compaction stalls); CPUs at full clock on bare metal.
+: >/etc/tmpfiles.d/dnsjos-tuning.conf
+[ ! -w /sys/kernel/mm/transparent_hugepage/enabled ] ||
+	echo 'w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise' >>/etc/tmpfiles.d/dnsjos-tuning.conf
+! grep -qsw performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors ||
+	echo 'w /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor - - - - performance' >>/etc/tmpfiles.d/dnsjos-tuning.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/dnsjos-tuning.conf >/dev/null 2>&1 || true
+# NIC: spread DNS over every CPU, re-applied at boot.
+mkdir -p /usr/local/lib/dnsjos
+cat >/usr/local/lib/dnsjos/nic-tuning.sh <<'EOF'
+#!/bin/sh
+# Written by the DnsJos installer: spread DNS packets over every CPU.
+dev=$(ip -4 route show default | awk '{print $5; exit}')
+[ -n "$dev" ] || exit 0
+for l in /sys/class/net/"$dev"/lower_*; do [ -e "$l" ] && dev=${l##*/lower_}; done # VLAN: its NIC
+# Multi-queue NICs hash UDP on IPs only by default: one busy source pins one queue.
+if command -v ethtool >/dev/null 2>&1; then
+	ethtool -N "$dev" rx-flow-hash udp4 sdfn 2>/dev/null
+	ethtool -N "$dev" rx-flow-hash udp6 sdfn 2>/dev/null
+fi
+# Single-queue NICs (common on VMs): RPS/RFS spreads receive processing in software.
+n=$(nproc); [ "$n" -le 32 ] || n=32
+if [ "$(ls -d /sys/class/net/"$dev"/queues/rx-* | wc -l)" = 1 ] && [ "$n" -gt 1 ]; then
+	printf '%x\n' $(((1 << n) - 1)) >/sys/class/net/"$dev"/queues/rx-0/rps_cpus
+	echo 32768 >/sys/class/net/"$dev"/queues/rx-0/rps_flow_cnt
+fi
+exit 0
+EOF
+chmod 0755 /usr/local/lib/dnsjos/nic-tuning.sh
+cat >/etc/systemd/system/dnsjos-nic-tuning.service <<'EOF'
+[Unit]
+Description=DnsJos NIC tuning (UDP RSS on ports, RPS/RFS on single-queue NICs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/dnsjos/nic-tuning.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable dnsjos-nic-tuning.service >/dev/null 2>&1
+systemctl restart dnsjos-nic-tuning.service || true
+# default_qdisc only applies to new qdiscs: rebuild the NIC's root qdisc once now.
+NIC=$(ip -4 route show default | awk '{print $5; exit}')
+for l in /sys/class/net/"$NIC"/lower_*; do [ -e "$l" ] && NIC=${l##*/lower_}; done
+if [ -n "$NIC" ] && grep -q '= fq$' /etc/sysctl.d/91-dnsjos-tuning.conf && command -v tc >/dev/null 2>&1; then
+	case $(tc qdisc show dev "$NIC" | awk 'NR == 1 {print $2}') in
+	mq) tc qdisc replace dev "$NIC" root mq ;;
+	fq) ;;
+	*) tc qdisc replace dev "$NIC" root fq ;;
+	esac
+fi
+
 # ── 4. free port 53 from the systemd-resolved stub listener ─────────────────
 if [ "$ADOPT" = 0 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
 	if ! grep -rqs '^DNSStubListener=no' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d; then
