@@ -620,6 +620,14 @@ export interface BlocklistLookup {
 }
 
 /** A name entering (added) or leaving the blocklist in a build. */
+/** GET /blocklist/builds/{id}/changes: q = substring, limit 1..1000 (default 200). */
+export interface BlocklistChangesQuery {
+  q?: string
+  kind?: 'added' | 'removed' // default both, added first
+  limit?: number
+  offset?: number
+}
+
 export interface BlocklistChange {
   build_id: number
   name: string

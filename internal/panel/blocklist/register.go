@@ -285,17 +285,31 @@ func (s *Service) listChanges(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	offset = max(offset, 0)
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	// kind: "added" | "removed" | "" (both, added first).
+	var added *bool
+	switch k := r.URL.Query().Get("kind"); k {
+	case "added", "removed":
+		v := k == "added"
+		added = &v
+	case "":
+	default:
+		httpx.BadRequest(w, "kind must be added or removed")
+		return
+	}
 	where := ` FROM blocklist_changes c JOIN blocklist_builds b ON b.id = c.build_id
-		WHERE c.build_id = $1 AND strpos(c.name, $2) > 0`
-	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+changeCols+where+" ORDER BY c.added DESC, c.name LIMIT $3", id, q, limit)
+		WHERE c.build_id = $1 AND strpos(c.name, $2) > 0 AND ($3::boolean IS NULL OR c.added = $3)`
+	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+changeCols+where+" ORDER BY c.added DESC, c.name LIMIT $4 OFFSET $5",
+		id, q, added, limit, offset)
 	items, err := scanChanges(rows)
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
 	var total int
-	if err := s.d.Pool.QueryRow(r.Context(), "SELECT count(*)"+where, id, q).Scan(&total); err != nil {
+	if err := s.d.Pool.QueryRow(r.Context(), "SELECT count(*)"+where, id, q, added).Scan(&total); err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
 	}

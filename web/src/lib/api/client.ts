@@ -1,4 +1,4 @@
-import { QueryClient, useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query'
+import { keepPreviousData, QueryClient, useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query'
 import type {
   AnalyticsKind,
   AnalyticsQuery,
@@ -15,6 +15,7 @@ import type {
   BlockedReportQuery,
   BlocklistBuild,
   BlocklistChange,
+  BlocklistChangesQuery,
   BlocklistLookup,
   BlocklistSource,
   BlocklistSourceCreate,
@@ -182,7 +183,7 @@ export const api = {
     build: (force = false) => post<BlocklistBuild>(`${V1}/blocklist/builds${force ? '?force=true' : ''}`),
     current: () => get<BlocklistBuild | null>(`${V1}/blocklist/current`),
     lookup: (name: string) => get<BlocklistLookup>(`${V1}/blocklist/lookup?name=${enc(name)}`),
-    changes: (id: number, q: string) => get<List<BlocklistChange>>(`${V1}/blocklist/builds/${id}/changes?q=${enc(q)}`),
+    changes: (id: number, q: BlocklistChangesQuery) => get<List<BlocklistChange>>(`${V1}/blocklist/builds/${id}/changes${qs({ ...q })}`),
   },
   allowlist: {
     list: () => get<List<AllowEntry>>(`${V1}/allowlist`),
@@ -252,7 +253,7 @@ export const qk = {
   blocklistBuilds: ['blocklist', 'builds'] as const,
   blocklistCurrent: ['blocklist', 'current'] as const,
   blocklistLookup: (name: string) => ['blocklist', 'lookup', name] as const,
-  blocklistChanges: (id: number, q: string) => ['blocklist', 'changes', id, q] as const,
+  blocklistChanges: (id: number, q: BlocklistChangesQuery) => ['blocklist', 'changes', id, q] as const,
   allowlist: ['allowlist'] as const,
   blocked: (q: BlockedReportQuery) => ['reports', 'blocked', q] as const,
   analytics: (q: AnalyticsQuery) => ['analytics', q] as const,
@@ -335,8 +336,8 @@ export const useBlocklistCurrent = () =>
 /** Disabled while name is empty. */
 export const useBlocklistLookup = (name: string) =>
   useQuery({ queryKey: qk.blocklistLookup(name), queryFn: () => api.blocklist.lookup(name), enabled: name !== '' })
-export const useBlocklistChanges = (id: number, q: string) =>
-  useQuery({ queryKey: qk.blocklistChanges(id, q), queryFn: () => api.blocklist.changes(id, q) })
+export const useBlocklistChanges = (id: number, q: BlocklistChangesQuery) =>
+  useQuery({ queryKey: qk.blocklistChanges(id, q), queryFn: () => api.blocklist.changes(id, q), placeholderData: keepPreviousData })
 export const useAllowlist = () => useQuery({ queryKey: qk.allowlist, queryFn: api.allowlist.list })
 export const useBlockedReport = (q: BlockedReportQuery) =>
   useQuery({ queryKey: qk.blocked(q), queryFn: () => api.reports.blocked(q) })

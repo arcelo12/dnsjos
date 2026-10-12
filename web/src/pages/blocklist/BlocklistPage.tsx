@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useDeferredValue, useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { LuHammer,
+import { LuChevronLeft, LuChevronRight, LuHammer,
   LuRefreshCw, LuPencil, LuPlus, LuSearch, LuShieldBan, LuShieldCheck, LuTrash2 } from 'react-icons/lu'
 import { toast } from 'sonner'
 
@@ -36,7 +36,7 @@ import {
 } from '@/lib/api/client'
 import type { BlocklistBuild, BlocklistLookup, BlocklistSource, BlocklistSourceKind } from '@/lib/api/types'
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, shortSha } from '@/lib/format'
-import { looksLikeIP } from '@/lib/utils'
+import { cn, looksLikeIP } from '@/lib/utils'
 
 import { AllowDialog, AllowlistCard } from './Allowlist'
 
@@ -149,26 +149,64 @@ export default function BlocklistPage() {
   )
 }
 
+const CHANGES_PAGE = 200
+
 function ChangesDialog({ build, onClose }: { build: BlocklistBuild; onClose: () => void }) {
   const [q, setQ] = useState('')
-  const { data, isPending, error } = useBlocklistChanges(build.id, useDeferredValue(q.trim().toLowerCase()))
+  const [kind, setKind] = useState<'added' | 'removed' | ''>('')
+  const [offset, setOffset] = useState(0)
+  const query = useDeferredValue(q.trim().toLowerCase())
+  const { data, isPending, isPlaceholderData, error } = useBlocklistChanges(build.id, { q: query, kind: kind || undefined, limit: CHANGES_PAGE, offset })
+  const kinds = [
+    { id: '', label: 'All', count: build.added + build.removed },
+    { id: 'added', label: 'Added', count: build.added },
+    { id: 'removed', label: 'Removed', count: build.removed },
+  ] as const
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>
             Build #{build.id} changes · <span className="text-success">+{fmtNumber(build.added)}</span>{' '}
             <span className="text-destructive">−{fmtNumber(build.removed)}</span>
           </DialogTitle>
         </DialogHeader>
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter names" aria-label="Filter changed names" />
+        <div className="flex gap-2">
+          <div className="flex shrink-0 rounded-md border p-0.5" role="group" aria-label="Change type">
+            {kinds.map((k) => (
+              <Button
+                key={k.id}
+                type="button"
+                size="sm"
+                variant={kind === k.id ? 'secondary' : 'ghost'}
+                className="h-8 px-2.5"
+                aria-pressed={kind === k.id}
+                onClick={() => {
+                  setKind(k.id)
+                  setOffset(0)
+                }}
+              >
+                {k.label} <span className="tabular text-muted-foreground">{fmtNumber(k.count)}</span>
+              </Button>
+            ))}
+          </div>
+          <Input
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value)
+              setOffset(0)
+            }}
+            placeholder="Filter names"
+            aria-label="Filter changed names"
+          />
+        </div>
         {isPending ? (
           <Skeleton className="h-40 w-full" />
         ) : error ? (
           <p className="text-sm text-destructive">{error.message}</p>
         ) : (
           <>
-            <ul className="max-h-96 overflow-y-auto rounded-md border font-mono text-xs">
+            <ul className={cn('max-h-96 overflow-y-auto rounded-md border font-mono text-xs', isPlaceholderData && 'opacity-60')}>
               {data.items.map((c) => (
                 <li key={c.name} className="flex gap-2 border-b px-3 py-1.5 last:border-b-0">
                   <span className={c.added ? 'text-success' : 'text-destructive'}>{c.added ? '+' : '−'}</span>
@@ -177,10 +215,24 @@ function ChangesDialog({ build, onClose }: { build: BlocklistBuild; onClose: () 
               ))}
               {data.items.length === 0 && <li className="px-3 py-4 text-center text-muted-foreground">No matching names</li>}
             </ul>
-            <p className="text-xs text-muted-foreground">
-              Showing {fmtNumber(data.items.length)} of {fmtNumber(data.total)}
-              {data.total < build.added + build.removed && ' (very large changes keep only the first 500,000 names each way)'}
-            </p>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <p className="flex-1">
+                {data.total ? `${fmtNumber(offset + 1)}–${fmtNumber(offset + data.items.length)}` : '0'} of {fmtNumber(data.total)}
+                {!query && !kind && data.total < build.added + build.removed && ' (very large changes keep only the first 500,000 names each way)'}
+              </p>
+              <Button type="button" variant="outline" size="sm" disabled={offset === 0 || isPlaceholderData} onClick={() => setOffset(Math.max(0, offset - CHANGES_PAGE))}>
+                <LuChevronLeft /> Prev
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={offset + CHANGES_PAGE >= data.total || isPlaceholderData}
+                onClick={() => setOffset(offset + CHANGES_PAGE)}
+              >
+                Next <LuChevronRight />
+              </Button>
+            </div>
           </>
         )}
       </DialogContent>
