@@ -11,6 +11,7 @@ import { fmtBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { TABS, tabOf, useFieldErrors, useReadOnly, type TabId } from './context'
 import { ListEditor, NumField, Section, SwitchField, TextField } from './fields'
+import { IPAliasEditor } from './IPAliasEditor'
 import { ServfailSuggestions } from './ServfailSuggestions'
 import { UpstreamsEditor } from './UpstreamsEditor'
 import { isCIDR, isHostname, isIPPort } from './validate'
@@ -55,7 +56,7 @@ export function ConfigForm({
   const errTabs = new Set(Object.keys(errors).map(tabOf))
 
   const { do53, doh, dot, tls } = s.listen
-  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds, speed_check: sc, dnssec: dn } = s
+  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds, speed_check: sc, dnssec: dn, ip_alias: ia } = s
 
   return (
     <Tabs value={tab} onValueChange={(t) => onTabChange(t as TabId)} className="gap-4">
@@ -369,6 +370,10 @@ export function ConfigForm({
             help="Names (and their subdomains) whose answers are never dropped (domain-rules -dualstack-ip-selection no)."
           />
         </Section>
+      </TabsContent>
+
+      <TabsContent value="ip_alias" className="grid gap-4">
+        <IPAliasEditor value={ia} onChange={(v) => set('ip_alias', v)} />
       </TabsContent>
 
       <TabsContent value="dnssec" className="grid gap-4">
