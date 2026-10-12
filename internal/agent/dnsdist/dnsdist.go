@@ -50,11 +50,37 @@ func CheckConfig(ctx context.Context, conf string) error {
 
 // Console runs one Lua command on the running dnsdist through its control socket;
 // `dnsdist -c` reads controlSocket()/setKey() from conf.
+//
+// dnsdist exits 0 in several failure modes that matter to us: an unreadable or
+// broken config, a missing/invalid console key, and Lua errors raised by the
+// command itself all leave the exit status at 0. We therefore treat those known
+// failure signatures in the output as errors, so callers (WaitConsole, the CGK
+// reload path) cannot mistake a no-op for a successful command.
 func Console(ctx context.Context, conf, command string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	out, err := run(ctx, "-C", conf, "-c", "-e", command)
-	return dropLogLines(out), err
+	out = dropLogLines(out)
+	if err == nil {
+		err = consoleOutputErr(out)
+	}
+	return out, err
+}
+
+// consoleOutputErr maps a `dnsdist -c` transcript to an error when dnsdist
+// reports a failure but still exits 0 (see Console).
+func consoleOutputErr(out string) error {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Error:"),
+			strings.HasPrefix(line, "Fatal error:"),
+			strings.HasPrefix(line, "Unable to read configuration from"),
+			strings.HasPrefix(line, "The currently configured console key is not valid"):
+			return fmt.Errorf("dnsdist console: %s", line)
+		}
+	}
+	return nil
 }
 
 // dropLogLines removes the structured log lines dnsdist prints on stdout while it
