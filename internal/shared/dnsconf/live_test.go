@@ -44,6 +44,12 @@ type liveDnsdist struct {
 // and 192.0.2.1) in a real dnsdist against a backend answering the A records in ips;
 // it skips when dnsdist is not on PATH.
 func startDnsdist(t *testing.T, ips map[string][]string) *liveDnsdist {
+	return startDnsdistMut(t, ips, nil)
+}
+
+// startDnsdistMut is startDnsdist with a final chance to adjust the spec (e.g. enable
+// ip-alias with a rule for the test).
+func startDnsdistMut(t *testing.T, ips map[string][]string, mutate func(*api.ConfigSpec)) *liveDnsdist {
 	bin, err := exec.LookPath("dnsdist")
 	if err != nil {
 		t.Skip("dnsdist not on PATH")
@@ -104,6 +110,9 @@ func startDnsdist(t *testing.T, ips map[string][]string) *liveDnsdist {
 	spec.DualStack.Enabled = true
 	spec.SpeedCheck.FastestIP = true
 	spec.Analytics.StreamAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t)) // nobody listens; fine
+	if mutate != nil {
+		mutate(&spec)
+	}
 	rt := testRT
 	rt.BaseDir, rt.CDBPath = d.dir, cdbPath
 	files, err := Render(spec, rt)
@@ -403,5 +412,61 @@ func TestLiveFastestIP(t *testing.T) {
 	d.console("fipReload()")
 	if got := addrs(d.query("one.example.", dns.TypeA)); !slices.Equal(got, []string{"198.51.100.9"}) {
 		t.Errorf("single address changed: %v", got)
+	}
+}
+
+// TestLiveIPAlias checks that an answer address inside a rule's pool is rewritten to its
+// targets (round-robin), that an excluded name keeps its real addresses, and that an
+// address outside the pool is left alone.
+func TestLiveIPAlias(t *testing.T) {
+	d := startDnsdistMut(t, map[string][]string{
+		"cdn.example.":         {"104.16.5.5", "104.17.6.6"}, // both inside 104.16.0.0/13
+		"other.example.":       {"198.51.100.7"},             // outside every pool
+		"tunnel.example.":      {"104.16.9.9"},               // inside the pool but excluded
+		"deep.tunnel.example.": {"104.16.10.10"},             // excluded via suffix
+	}, func(s *api.ConfigSpec) {
+		s.IPAlias = api.IPAlias{Enabled: true, Rules: []api.IPAliasRule{{
+			Name:       "cf",
+			MatchPools: []string{"104.16.0.0/13", "172.64.0.0/13"},
+			Targets:    []string{"172.64.52.159", "172.64.87.224"},
+			Exclude:    []string{"tunnel.example"},
+		}}}
+	})
+	addrs := func(r *dns.Msg) []string {
+		var out []string
+		for _, rr := range r.Answer {
+			if a, ok := rr.(*dns.A); ok {
+				out = append(out, a.A.String())
+			}
+		}
+		return out
+	}
+	targets := map[string]bool{"172.64.52.159": true, "172.64.87.224": true}
+
+	// Both addresses are inside the pool, so both are rewritten, cycling through targets.
+	for i := range 3 {
+		got := addrs(d.query("cdn.example.", dns.TypeA))
+		if len(got) != 2 || !targets[got[0]] || !targets[got[1]] || got[0] == got[1] {
+			t.Fatalf("cdn #%d: want both addresses rewritten to distinct targets, got %v", i, got)
+		}
+	}
+	// Round-robin: consecutive responses must not always start with the same target.
+	var firsts []string
+	for range 4 {
+		firsts = append(firsts, addrs(d.query("cdn.example.", dns.TypeA))[0])
+	}
+	if slices.Contains(firsts, "172.64.52.159") == slices.Contains(firsts, "172.64.87.224") {
+		t.Errorf("targets did not rotate: %v", firsts)
+	}
+	// Outside the pool: untouched.
+	if got := addrs(d.query("other.example.", dns.TypeA)); !slices.Equal(got, []string{"198.51.100.7"}) {
+		t.Errorf("outside-pool name rewritten: %v", got)
+	}
+	// Excluded name and its subdomain: untouched.
+	if got := addrs(d.query("tunnel.example.", dns.TypeA)); !slices.Equal(got, []string{"104.16.9.9"}) {
+		t.Errorf("excluded name rewritten: %v", got)
+	}
+	if got := addrs(d.query("deep.tunnel.example.", dns.TypeA)); !slices.Equal(got, []string{"104.16.10.10"}) {
+		t.Errorf("excluded subdomain rewritten: %v", got)
 	}
 }

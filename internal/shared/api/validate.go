@@ -173,6 +173,38 @@ func (s ConfigSpec) Validate() error {
 	hostnames("speed_check.exclude", s.SpeedCheck.Exclude)
 	between("dualstack.threshold_ms", s.DualStack.ThresholdMs, 0, 1000)
 	hostnames("dualstack.exclude", s.DualStack.Exclude)
+	if ia := s.IPAlias; ia.Enabled {
+		for i, r := range ia.Rules {
+			field := fmt.Sprintf("ip_alias.rules[%d]", i)
+			if strings.TrimSpace(r.Name) == "" {
+				bad(field+".name", "required")
+			}
+			prefixes(field+".match_pools", r.MatchPools)
+			if len(r.MatchPools) == 0 {
+				bad(field+".match_pools", "at least one CIDR required")
+			}
+			if len(r.Targets) == 0 {
+				bad(field+".targets", "at least one address required")
+			}
+			ipv6 := false
+			for j, t := range r.Targets {
+				a, err := netip.ParseAddr(t)
+				if err != nil {
+					bad(fmt.Sprintf("%s.targets[%d]", field, j), "%q is not an IP address", t)
+					continue
+				}
+				if j == 0 {
+					ipv6 = a.Is6() && !a.Is4In6()
+					continue
+				}
+				is6 := a.Is6() && !a.Is4In6()
+				if is6 != ipv6 {
+					bad(fmt.Sprintf("%s.targets[%d]", field, j), "must be the same address family as targets[0]")
+				}
+			}
+			hostnames(field+".exclude", r.Exclude)
+		}
+	}
 	hostnames("dnssec.exclude", s.DNSSEC.Exclude)
 
 	between("tuning.udp_buffer_bytes", s.Tuning.UDPBufferBytes, 0, 1<<30)

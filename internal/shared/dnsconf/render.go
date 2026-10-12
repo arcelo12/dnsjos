@@ -44,6 +44,7 @@ const (
 	FileCGKLearned = "dnsjos/cgk-learned-exclude.txt"
 	FileDualStack  = "dnsjos/dualstack.lua"
 	FileFastestIP  = "dnsjos/fastest-ip.lua"
+	FileIPAlias    = "dnsjos/ip-alias.lua"
 	// Per-address speeds the agent measured (never rendered).
 	FileFastestIPList = "dnsjos/fastest-ip.txt"
 	// Names the agent measured faster over IPv4 / IPv6 (never rendered).
@@ -201,7 +202,7 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 		files[rel] = body
 		w("dofile(%s)\n", luaString(path.Join(rt.BaseDir, rel)))
 	}
-	if spec.Blocking.Enabled || spec.Abuse.Enabled || spec.CGK.Enabled || spec.DualStack.Enabled || spec.SpeedCheck.FastestIP {
+	if spec.Blocking.Enabled || spec.Abuse.Enabled || spec.CGK.Enabled || spec.DualStack.Enabled || spec.SpeedCheck.FastestIP || spec.IPAlias.Enabled {
 		c.WriteString("\n")
 	}
 	if spec.Blocking.Enabled {
@@ -230,6 +231,9 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 	}
 	if spec.SpeedCheck.FastestIP {
 		module(FileFastestIP, renderFastestIP(spec.SpeedCheck, rt))
+	}
+	if spec.IPAlias.Enabled {
+		module(FileIPAlias, renderIPAlias(spec.IPAlias, rt))
 	}
 	if an := spec.Analytics; an.Enabled {
 		ap, err := addrPort(an.StreamAddr)

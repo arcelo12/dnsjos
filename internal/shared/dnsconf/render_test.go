@@ -38,6 +38,15 @@ func TestGolden(t *testing.T) {
 			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
 			s.SpeedCheck.FastestIP, s.SpeedCheck.MaxReplyIPNum = true, 4
 		},
+		"ip_alias": func(s *api.ConfigSpec) {
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.IPAlias = api.IPAlias{Enabled: true, Rules: []api.IPAliasRule{
+				{Name: "cf", MatchPools: []string{"104.16.0.0/13", "172.64.0.0/13"},
+					Targets: []string{"172.64.52.159", "172.64.87.224"}, Exclude: []string{"cftunnel.com"}},
+				{Name: "cf6", MatchPools: []string{"2606:4700::/32"},
+					Targets: []string{"2606:4700:3030::6810:3459"}},
+			}}
+		},
 		"response_ips": func(s *api.ConfigSpec) { // opt-in (off by default)
 			s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false
 			s.Blocking.BlockResponseIPs = true
