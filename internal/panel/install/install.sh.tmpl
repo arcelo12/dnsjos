@@ -163,9 +163,13 @@ if [ "$WITH_UNBOUND" = 1 ]; then
 	while [ "$UB_SLABS" -lt "$UB_THREADS" ]; do UB_SLABS=$((UB_SLABS * 2)); done
 	UB_RRSET=$(awk '/^MemTotal:/ {m = int($2 / 1024 / 16); if (m < 64) m = 64; if (m > 1024) m = 1024; print m; exit}' /proc/meminfo)
 	UB_RRSET=${UB_RRSET:-128}
-	# No IPv6 default route: don't waste the first try on IPv6 name servers.
+	# Only use IPv6 name servers when IPv6 actually reaches the internet: a default route
+	# with a dead uplink makes every first lookup wait for IPv6 timeouts.
 	UB_IP6=no
-	[ -z "$(ip -6 route show default 2>/dev/null)" ] || UB_IP6=yes
+	if [ -n "$(ip -6 route show default 2>/dev/null)" ] &&
+		{ ping -6 -c 1 -W 2 2001:4860:4860::8888 || ping -6 -c 1 -W 2 2606:4700:4700::1111; } >/dev/null 2>&1; then
+		UB_IP6=yes
+	fi
 	cat >/etc/unbound/unbound.conf.d/dnsjos.conf <<EOF
 # Managed by the DnsJos installer: recursive resolver behind dnsdist, loopback only.
 # Re-run the installer with --with-unbound to resize after a CPU/RAM change.
