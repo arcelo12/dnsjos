@@ -326,11 +326,15 @@ func TestPickOwner(t *testing.T) {
 }
 
 // TestManagedCoversRender: a module missing from Managed passes the staged check but is never
-// installed, so dnsdist fails to start on its dofile() (seen with dualstack.lua).
+// installed, so dnsdist fails to start on its dofile() (seen with dualstack.lua). Every
+// opt-in module must be enabled here, or its file is not rendered and stays untested.
 func TestManagedCoversRender(t *testing.T) {
 	spec := api.DefaultConfigSpec()
 	spec.Blocking.Enabled, spec.Abuse.Enabled, spec.CGK.Enabled = true, true, true
 	spec.DualStack.Enabled, spec.SpeedCheck.FastestIP = true, true
+	spec.IPAlias = api.IPAlias{Enabled: true, Rules: []api.IPAliasRule{{
+		Name: "cf", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"172.64.52.159"},
+	}}}
 	files, err := dnsconf.Render(spec, rt(t.TempDir()))
 	if err != nil {
 		t.Fatal(err)

@@ -416,14 +416,16 @@ func TestLiveFastestIP(t *testing.T) {
 }
 
 // TestLiveIPAlias checks that an answer address inside a rule's pool is rewritten to its
-// targets (round-robin), that an excluded name keeps its real addresses, and that an
-// address outside the pool is left alone.
+// targets (round-robin), that an excluded name keeps its real addresses (directly and
+// through a CNAME chain into it), and that an address outside the pool is left alone.
 func TestLiveIPAlias(t *testing.T) {
 	d := startDnsdistMut(t, map[string][]string{
 		"cdn.example.":         {"104.16.5.5", "104.17.6.6"}, // both inside 104.16.0.0/13
+		"rotate.example.":      {"104.16.20.20"},             // one address: rotation is observable
 		"other.example.":       {"198.51.100.7"},             // outside every pool
 		"tunnel.example.":      {"104.16.9.9"},               // inside the pool but excluded
 		"deep.tunnel.example.": {"104.16.10.10"},             // excluded via suffix
+		"acme.example.":        {"cname:tunnel.example."},    // CNAMEs into an excluded name
 	}, func(s *api.ConfigSpec) {
 		s.IPAlias = api.IPAlias{Enabled: true, Rules: []api.IPAliasRule{{
 			Name:       "cf",
@@ -450,13 +452,24 @@ func TestLiveIPAlias(t *testing.T) {
 			t.Fatalf("cdn #%d: want both addresses rewritten to distinct targets, got %v", i, got)
 		}
 	}
-	// Round-robin: consecutive responses must not always start with the same target.
+	// Round-robin: a single-address name advances the cursor by one per response, so
+	// consecutive responses must alternate targets. This only holds when rewritten
+	// responses skip the packet cache (a cached answer would freeze the rotation).
 	var firsts []string
 	for range 4 {
-		firsts = append(firsts, addrs(d.query("cdn.example.", dns.TypeA))[0])
+		got := addrs(d.query("rotate.example.", dns.TypeA))
+		if len(got) != 1 {
+			t.Fatalf("rotate: %v", got)
+		}
+		firsts = append(firsts, got[0])
 	}
-	if slices.Contains(firsts, "172.64.52.159") == slices.Contains(firsts, "172.64.87.224") {
-		t.Errorf("targets did not rotate: %v", firsts)
+	for i, got := range firsts {
+		if !targets[got] {
+			t.Fatalf("rotate #%d: %q is not a target", i, got)
+		}
+		if i > 0 && got == firsts[i-1] {
+			t.Errorf("targets did not rotate: %v", firsts)
+		}
 	}
 	// Outside the pool: untouched.
 	if got := addrs(d.query("other.example.", dns.TypeA)); !slices.Equal(got, []string{"198.51.100.7"}) {
@@ -468,5 +481,9 @@ func TestLiveIPAlias(t *testing.T) {
 	}
 	if got := addrs(d.query("deep.tunnel.example.", dns.TypeA)); !slices.Equal(got, []string{"104.16.10.10"}) {
 		t.Errorf("excluded subdomain rewritten: %v", got)
+	}
+	// Not excluded itself, but its answer chain ends in an excluded owner: untouched.
+	if got := addrs(d.query("acme.example.", dns.TypeA)); !slices.Equal(got, []string{"104.16.9.9"}) {
+		t.Errorf("CNAME into an excluded name rewritten: %v", got)
 	}
 }

@@ -188,18 +188,49 @@ func (s ConfigSpec) Validate() error {
 			}
 			ipv6 := false
 			for j, t := range r.Targets {
+				f := fmt.Sprintf("%s.targets[%d]", field, j)
 				a, err := netip.ParseAddr(t)
 				if err != nil {
-					bad(fmt.Sprintf("%s.targets[%d]", field, j), "%q is not an IP address", t)
+					bad(f, "%q is not an IP address", t)
 					continue
+				}
+				// dnsdist and the Lua target encoder silently drop zoned, IPv4-mapped and
+				// dotted-tail forms (a rule whose targets all drop is dead): reject them.
+				switch {
+				case a.Zone() != "":
+					bad(f, "%q carries a zone; zones are not supported", t)
+				case a.Is4In6():
+					bad(f, "%q is an IPv4-mapped IPv6 address; write its IPv4 form", t)
+				case a.Is6() && strings.Contains(t, "."):
+					bad(f, "%q has a dotted tail; write the IPv6 address in hex", t)
 				}
 				if j == 0 {
 					ipv6 = a.Is6() && !a.Is4In6()
 					continue
 				}
-				is6 := a.Is6() && !a.Is4In6()
-				if is6 != ipv6 {
-					bad(fmt.Sprintf("%s.targets[%d]", field, j), "must be the same address family as targets[0]")
+				if is6 := a.Is6() && !a.Is4In6(); is6 != ipv6 {
+					bad(f, "must be the same address family as targets[0]")
+				}
+			}
+			// dnsdist's NetmaskGroup matches nothing for an IPv4-mapped pool, and a pool
+			// of the other family than the targets can never match either: dead rules.
+			for j, p := range r.MatchPools {
+				f := fmt.Sprintf("%s.match_pools[%d]", field, j)
+				pa, err := netip.ParsePrefix(p)
+				if err != nil {
+					a, aerr := netip.ParseAddr(p)
+					if aerr != nil {
+						continue // the syntax error is already reported by prefixes()
+					}
+					pa = netip.PrefixFrom(a, a.BitLen())
+				}
+				switch {
+				case pa.Addr().Zone() != "":
+					bad(f, "zones are not supported in match_pools")
+				case pa.Addr().Is4In6():
+					bad(f, "%q is an IPv4-mapped IPv6 prefix; write its IPv4 form", p)
+				case pa.Addr().Is6() != ipv6:
+					bad(f, "must be the same address family as targets[0]")
 				}
 			}
 			hostnames(field+".exclude", r.Exclude)

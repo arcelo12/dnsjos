@@ -795,6 +795,31 @@ local function fmtAddr(p, rd, rdlen)
   return table.concat(g, ":")
 end
 
+-- ownerName decodes the (possibly compressed) wire name at pos into a dotted text
+-- name: newDNSName does not take wire bytes, so excluded owners are rebuilt as text.
+local function ownerName(p, pos)
+  local out, jumps = {}, 0
+  while true do
+    local l = p:byte(pos)
+    if not l then return nil end
+    if l >= 192 then
+      local lo = p:byte(pos + 1)
+      jumps = jumps + 1
+      if not lo or jumps > 16 then return nil end
+      pos = (l - 192) * 256 + lo + 1
+    elseif l >= 64 then
+      return nil
+    elseif l == 0 then
+      return table.concat(out, ".")
+    else
+      local lbl = p:sub(pos + 1, pos + l)
+      if #lbl ~= l then return nil end
+      out[#out + 1] = lbl
+      pos = pos + l + 1
+    end
+  end
+end
+
 -- ipToBytes turns an address string into its 4 (IPv4) or 16 (IPv6) wire bytes.
 local function ip4ToBytes(s)
   local a, b, c, d = s:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
@@ -813,6 +838,10 @@ end
 	for i, r := range ia.Rules {
 		s.WriteString(renderIPAliasRule(i, r))
 	}
+	// Rewritten responses skip the packet cache, so the target rotation is not frozen
+	// by the first cached answer.
+	s.WriteString(`addResponseAction(TagRule("dnsjos-ipa", "rewritten"), SetSkipCacheResponseAction(), {name = "dnsjos-ip-alias-nocache"})
+`)
 	return []byte(s.String())
 }
 
@@ -842,16 +871,28 @@ func renderIPAliasRule(idx int, r api.IPAliasRule) string {
     local pos = skipName(p, 13)
     if not pos or pos + 3 > #p then return DNSResponseAction.None, "" end
     pos = pos + 4 -- first byte after the question
-    -- Pass 1: is any answer address inside one of the rule's pools?
+    -- Pass 1: is any answer address inside one of the rule's pools? A matching record
+    -- whose own owner name is excluded (a CNAME can chain into one) is left alone.
     local hits, scan = {}, pos
     for _ = 1, at16(p, 7) do
+      local rr = scan
       scan = skipName(p, scan)
       if not scan or scan + 9 > #p then return DNSResponseAction.None, "" end
       local t, rl = at16(p, scan), at16(p, scan + 8)
       local rd = scan + 10
       if rd + rl - 1 > #p then return DNSResponseAction.None, "" end
-      if t == ipa%d.qtype and rl == ipa%d.rdlen then
-        if ipa%d.pools:match(newCA(fmtAddr(p, rd, ipa%d.rdlen))) then hits[#hits + 1] = rd end
+      if t == ipa%d.qtype and rl == ipa%d.rdlen and ipa%d.pools:match(newCA(fmtAddr(p, rd, ipa%d.rdlen))) then
+        local excluded = false
+        if ipa%d.excluded then
+          local n = ownerName(p, rr)
+          if not n then
+            excluded = true
+          else
+            local ok, dn = pcall(newDNSName, n)
+            excluded = not (ok and dn) or ipa%d.exclude:check(dn)
+          end
+        end
+        if not excluded then hits[#hits + 1] = rd end
       end
       scan = rd + rl
     end
@@ -867,18 +908,17 @@ func renderIPAliasRule(idx int, r api.IPAliasRule) string {
     local out = {}
     for i = 1, #bytes do out[i] = string.char(bytes[i]) end
     dr:setContent(table.concat(out))
+    -- The rewritten answer must not be packet-cached, or the cache would freeze the
+    -- first rotation step; the TagRule + SetSkipCacheResponseAction below reads this tag.
+    dr:setTag("dnsjos-ipa", "rewritten")
     incMetric("ip-alias-rewrites")
     return DNSResponseAction.None, ""
   end), {name = "dnsjos-ip-alias: " .. ipa%d.name})
 end
 `,
-		idx, idx, idx,
-		idx, idx,
-		idx, idx, idx,
-		idx,
-		idx, idx,
-		idx, idx, idx,
-		idx, idx)
+		idx, idx, idx, idx, idx, idx,
+		idx, idx, idx, idx, idx, idx,
+		idx, idx, idx, idx, idx, idx)
 	return s.String()
 }
 

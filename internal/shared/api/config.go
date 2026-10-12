@@ -148,9 +148,9 @@ type IPAliasRule struct {
 	// MatchPools are CIDR ranges; an answer is rewritten when any of its A/AAAA addresses
 	// is inside one of them (the CDN's space, e.g. Cloudflare's 104.16.0.0/13).
 	MatchPools []string `json:"match_pools"`
-	// Targets are the preferred addresses written into the answer. All must be the same
-	// family as the query (IPv4 for A, IPv6 for AAAA); a rule's pool list decides which
-	// family it covers.
+	// Targets are the preferred addresses written into the answer, used round-robin. All
+	// must be one family, and targets[0] decides which one the rule covers (IPv4 = A,
+	// IPv6 = AAAA).
 	Targets []string `json:"targets"`
 	// Exclude lists names (and their subdomains) never rewritten by this rule
 	// (smartdns' exclude_domain_set), e.g. tunnel endpoints that must keep their real IP.
