@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { CopyButton } from '@/components/CopyButton'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -36,6 +37,7 @@ export function AddNodeDialog() {
   const [ttl, setTtl] = useState('24')
   const [labels, setLabels] = useState('')
   const [created, setCreated] = useState<EnrollmentTokenCreated>()
+  const [withUnbound, setWithUnbound] = useState(false)
   const profiles = useProfiles()
   const create = useCreateEnrollmentToken()
 
@@ -47,6 +49,7 @@ export function AddNodeDialog() {
       setTtl('24')
       setProfile(DEFAULT_PROFILE)
       setCreated(undefined)
+      setWithUnbound(false)
       create.reset()
     }
   }
@@ -67,6 +70,8 @@ export function AddNodeDialog() {
     )
   }
 
+  const installCommand = created ? created.install_command + (withUnbound ? ' --with-unbound' : '') : ''
+
   return (
     <Dialog open={open} onOpenChange={reset}>
       <DialogTrigger asChild>
@@ -86,9 +91,18 @@ export function AddNodeDialog() {
                 <TimeAgo date={created.expires_at} /> ({fmtDateTime(created.expires_at)}).
               </DialogDescription>
             </DialogHeader>
+            <div className="flex items-start gap-2">
+              <Checkbox id="with-unbound" checked={withUnbound} onCheckedChange={(v) => setWithUnbound(v === true)} className="mt-0.5" />
+              <Label htmlFor="with-unbound" className="grid gap-0.5 font-normal">
+                <span className="font-medium">Also install Unbound recursive resolver</span>
+                <span className="text-xs text-muted-foreground">
+                  DNSSEC-validating cache on 127.0.0.1:5335 instead of forwarding to public DNS. Set the profile upstream to 127.0.0.1:5335.
+                </span>
+              </Label>
+            </div>
             <div className="flex items-start gap-2 rounded-md border bg-muted/50 p-3">
-              <code className="min-w-0 flex-1 font-mono text-xs break-all">{created.install_command}</code>
-              <CopyButton value={created.install_command} />
+              <code className="min-w-0 flex-1 font-mono text-xs break-all">{installCommand}</code>
+              <CopyButton value={installCommand} />
             </div>
             <div className="space-y-1 text-sm text-muted-foreground">
               <p className="font-medium text-foreground">What happens next</p>

@@ -59,6 +59,7 @@ type Heartbeat struct {
 	AgentVersion         string        `json:"agent_version"`
 	DnsdistVersion       string        `json:"dnsdist_version"`
 	OS                   string        `json:"os"`
+	PublicIPv6           string        `json:"public_ipv6"` // outbound IPv6 source address; "" without IPv6
 	UptimeS              int64         `json:"uptime_s"`
 	DnsdistRunning       bool          `json:"dnsdist_running"`
 	AppliedConfigVersion int           `json:"applied_config_version"`

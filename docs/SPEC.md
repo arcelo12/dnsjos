@@ -226,6 +226,10 @@ panel on save and in the agent before rendering.
     "allow_force_aaaa": false,                       // also drop A when IPv6 is faster
     "exclude": []                                    // names + subdomains never touched
   },
+  "dnssec": {                       // §6.10: zero value = validate everything
+    "disable_validation": false,                     // CD bit on every query
+    "exclude": []                                    // names + subdomains sent with CD (NTAs)
+  },
   "tuning": {"udp_buffer_bytes": 16777216, "tcp_workers": 0, "extra_lua": ""},
   "webserver": {"listen": "127.0.0.1:8083", "prometheus_acl": ["127.0.0.1/32"]},
   "analytics": {"enabled": true, "sample_rate": 1, "top_k": 5000, "stream_addr": "127.0.0.1:6001"}  // §19
@@ -519,6 +523,20 @@ smartdns' speed test (`speed-check-mode`) and the answer it builds from it. Pack
   every added, changed or removed name, since cache hits are not rebuilt. Metrics:
   `fastest-ip-rewrites`, `fastest-ip-names`.
 
+### 6.10 DNSSEC validation switch
+
+dnsdist does not validate DNSSEC; the upstreams do (Unbound from `install.sh
+--with-unbound`, or a public resolver). The profile controls it through the CD
+(checking disabled) bit, so nothing on the node besides dnsdist is managed:
+* `disable_validation`: `addAction(AllRule(), SetDisableValidationAction())`, every
+  query goes upstream with CD and bogus answers are returned instead of SERVFAIL.
+* otherwise `exclude` (lowercased, deduplicated) becomes a SuffixMatchNode with the same
+  action: negative trust anchors (RFC 7646) for zones with broken DNSSEC; `go.id` covers
+  every `*.go.id`.
+CD is set before the packet cache lookup and is part of the cache key, so validated and
+unvalidated answers never mix. The profile editor lists the top SERVFAIL names of the last
+7 days (§19) with one-click add and a DNSViz link: not every SERVFAIL is DNSSEC.
+
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 
 ### 7.1 Sources
@@ -630,7 +648,7 @@ as before.
 ```jsonc
 {
   "time": "RFC3339",
-  "agent_version": "…", "dnsdist_version": "…", "os": "…", "uptime_s": 0,
+  "agent_version": "…", "dnsdist_version": "…", "os": "…", "public_ipv6": "", "uptime_s": 0,
   "dnsdist_running": true,
   "applied_config_version": 12, "apply_error": "",
   "blocklist_sha256": "…", "blocklist_error": "",
@@ -779,6 +797,7 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `GET /api/v1/branding` | public: `Branding{name, tagline, assets}` — `assets` has every `api.BrandingAssets` key (`login_logo`, `navbar_light`, `navbar_dark`, `login_bg`, `login_bg_mobile`, `cloud`, `favicon_ico`, `icon_192`, `icon_512`, `apple_touch`), each `/branding/<file>?v=<mtime>` or `null` when the file is absent (§15) |
 | `GET /branding/{file}` | public: a file from `DNSJOS_BRAND_DIR`, only the names in `api.BrandingFiles` (correct `Content-Type`, `Cache-Control: public, max-age=86400`); anything else 404 |
 | `GET /favicon.ico` · `GET /manifest.webmanifest` | public: the brand `favicon.ico`, else a neutral built-in icon · web manifest with the brand name and `icon-192/512.png` (else `/favicon.ico`) |
+| `GET /brand-theme.css` | public: the brand `theme.css` (design-token overrides: `--brand-ink`, `--brand-accent`, `--primary`, `--sans-font`, `--display-font`, …; see `web/src/index.css`), else an empty stylesheet; `Cache-Control: no-cache`. Linked render-blocking from `index.html` |
 
 Every mutating admin action writes `audit_log`.
 
@@ -851,6 +870,16 @@ POSIX sh, idempotent, Debian 12/13 and Ubuntu 22.04/24.04, amd64/arm64:
    install `dnsdist`; disable systemd-resolved stub listener if it holds :53.
 3. download `/dl/agent/linux/<arch>` → `/usr/local/bin/dnsjos-agent` (verify sha256 from
    `/dl/agent/linux/<arch>.sha256`).
+   With `--with-unbound` also install Unbound (distro package) as a loopback-only recursive,
+   DNSSEC-validating resolver on `127.0.0.1:5335` (config written before the package so it
+   never binds :53; `unbound-resolvconf` masked). Tuned from the host: a thread per core (max 8),
+   rrset cache RAM/16 (64m–1g), prefetch, serve-expired (RFC 8767), aggressive NSEC, IPv6
+   only when a ping over IPv6 reaches the internet (a route alone can be a dead uplink). Profiles use it as upstream `127.0.0.1:5335`.
+   Kernel/NIC tuning (`/etc/sysctl.d/91-dnsjos-tuning.conf`, never lowering a value already
+   raised): backlog ≥ 16384, source ports 10000–65535 (unless a TCP service listens in
+   10000–32767), swappiness 10, fq + bbr, THP madvise, `performance` governor on bare metal.
+   `dnsjos-nic-tuning.service` hashes UDP on ports too (multi-queue NICs) or enables RPS/RFS
+   over every CPU (single-queue NICs, common on VMs).
 4. `dnsjos-agent enroll --panel P --token T`, install `dnsjos-agent.service`, enable+start.
 5. print node name and panel URL.
 Never touches an existing `/etc/dnsdist` without backing it up first.
@@ -886,7 +915,7 @@ Never touches an existing `/etc/dnsdist` without backing it up first.
 | `DNSJOS_LOG_LEVEL` | `info` |
 | `DNSJOS_BRAND_NAME` | `DnsJos` (UI name; also the SPA `<title>`, set server-side) |
 | `DNSJOS_BRAND_TAGLINE` | empty |
-| `DNSJOS_BRAND_DIR` | `$DNSJOS_DATA_DIR/branding` — operator-provided images (§10 `/branding/{file}`); the repository ships none |
+| `DNSJOS_BRAND_DIR` | `$DNSJOS_DATA_DIR/branding` — operator-provided images and optional `theme.css` (§10 `/branding/{file}`, `/brand-theme.css`); the repository ships none |
 
 ---
 

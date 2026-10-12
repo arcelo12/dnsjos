@@ -42,4 +42,5 @@ var BrandingFiles = map[string]string{
 	"icon-192.png":         "image/png",
 	"icon-512.png":         "image/png",
 	"apple-touch-icon.png": "image/png",
+	"theme.css":            "text/css; charset=utf-8", // design-token overrides, served at /brand-theme.css
 }

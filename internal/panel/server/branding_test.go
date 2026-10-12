@@ -80,6 +80,16 @@ func TestBrandingFiles(t *testing.T) {
 			t.Errorf("%s: served %q", path, rec.Body)
 		}
 	}
+	// brand-theme.css: the brand file, else an empty stylesheet (never a 404).
+	os.WriteFile(filepath.Join(dir, "theme.css"), []byte(":root{--brand-ink:navy}"), 0o644)
+	if rec := fetch(r, "/brand-theme.css"); rec.Code != 200 || rec.Body.String() != ":root{--brand-ink:navy}" ||
+		rec.Header().Get("Content-Type") != "text/css; charset=utf-8" || rec.Header().Get("Cache-Control") != "no-cache" {
+		t.Errorf("theme: %d %v %q", rec.Code, rec.Header(), rec.Body)
+	}
+	os.Remove(filepath.Join(dir, "theme.css"))
+	if rec := fetch(r, "/brand-theme.css"); rec.Code != 200 || rec.Body.Len() != 0 || rec.Header().Get("Content-Type") != "text/css; charset=utf-8" {
+		t.Errorf("default theme: %d %v %q", rec.Code, rec.Header(), rec.Body)
+	}
 	// favicon.ico: the brand file, else the generated default.
 	if rec := fetch(r, "/favicon.ico"); rec.Body.String() != "ico" {
 		t.Errorf("favicon: %q", rec.Body)

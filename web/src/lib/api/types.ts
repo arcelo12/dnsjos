@@ -98,6 +98,12 @@ export interface DualStack {
   exclude: string[] // names + subdomains never touched
 }
 
+/** SPEC §6.10: dnsdist sets the CD bit so upstreams (Unbound, public resolvers) skip DNSSEC validation. */
+export interface DNSSEC {
+  disable_validation: boolean // CD on every query
+  exclude: string[] // names + subdomains answered without validation (negative trust anchors)
+}
+
 /** SPEC §6.9: smartdns speed test (shared with dual-stack) and fastest-IP answers. */
 export interface SpeedCheck {
   mode: string // speed-check-mode: "ping,tcp:80,tcp:443" | "none" | …
@@ -152,6 +158,7 @@ export interface ConfigSpec {
   cgk: CGK
   speed_check: SpeedCheck
   dualstack: DualStack
+  dnssec: DNSSEC
   tuning: Tuning
   webserver: Webserver
   analytics: Analytics
@@ -215,6 +222,7 @@ export interface Heartbeat {
   agent_version: string
   dnsdist_version: string
   os: string
+  public_ipv6?: string // outbound IPv6 source address; absent from older agents, "" without IPv6
   uptime_s: number
   dnsdist_running: boolean
   applied_config_version: number
@@ -595,6 +603,8 @@ export interface BlocklistBuild {
   size_bytes: number
   sha256: string
   error: string
+  added: number
+  removed: number
 }
 
 export interface BlocklistLookup {
@@ -604,6 +614,25 @@ export interface BlocklistLookup {
   /** An active allowlist entry covers the name/IP; blocked may still be true until the next build. */
   allowed: boolean
   allow_entry: AllowEntry | null
+  /** When match was last added; null when it predates change tracking. */
+  blocked_since: string | null
+  history: BlocklistChange[] // the name and its parents, newest first
+}
+
+/** A name entering (added) or leaving the blocklist in a build. */
+/** GET /blocklist/builds/{id}/changes: q = substring, limit 1..1000 (default 200). */
+export interface BlocklistChangesQuery {
+  q?: string
+  kind?: 'added' | 'removed' // default both, added first
+  limit?: number
+  offset?: number
+}
+
+export interface BlocklistChange {
+  build_id: number
+  name: string
+  added: boolean
+  at: string // the build's finish time
 }
 
 /** SPEC §7.5: names/IPs never blocked (list mistakes such as shared CDN space). */

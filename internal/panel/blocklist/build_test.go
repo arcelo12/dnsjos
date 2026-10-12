@@ -10,9 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/billyriantono/dnsjos/internal/panel/app"
 	"github.com/billyriantono/dnsjos/internal/panel/config"
@@ -112,8 +115,25 @@ func TestBuildFlow(t *testing.T) {
 	if domains.n304 != 1 || b2.Domains != 3 || b2.IPs != 1 || !blocked("www.a.com") || !blocked("5.6.7.8") || blocked("1.2.3.4") {
 		t.Fatalf("build 2 dropped a 304 source: %+v (304s %d)", b2, domains.n304)
 	}
+	if b1.Added != 0 || b2.Added != 1 || b2.Removed != 1 { // 1.2.3.4 → 5.6.7.8
+		t.Fatalf("diff: b1 +%d, b2 +%d −%d", b1.Added, b2.Added, b2.Removed)
+	}
+	var changes []string
+	rows, _ := pool.Query(ctx, "SELECT name || ':' || added FROM blocklist_changes WHERE build_id = $1 ORDER BY name", b2.ID)
+	if changes, _ = pgx.CollectRows(rows, pgx.RowTo[string]); strings.Join(changes, " ") != "1.2.3.4:false 5.6.7.8:true" {
+		t.Fatalf("changes %v", changes)
+	}
 
 	build("skipped") // everything 304, nothing else changed
+
+	// A 200 with a new ETag but the same body keeps the old file, so the build is skipped too.
+	domains.set(`"d1b"`, "a.com\nb.com\nc.com\n")
+	build("skipped")
+	var same string
+	if err := pool.QueryRow(ctx, "SELECT last_status FROM blocklist_sources WHERE kind = 'trustpositif_domains'").Scan(&same); err != nil ||
+		!strings.HasSuffix(same, "content unchanged") {
+		t.Fatalf("identical 200 status: %q %v", same, err)
+	}
 
 	// force: full re-download (no conditional request) and a rebuild despite unchanged inputs.
 	hits, n304 := domains.hits, domains.n304
@@ -232,6 +252,15 @@ func testServeCDB(t *testing.T, d *app.Deps, s *Service) {
 	}
 }
 
+// lastChangedBuild is the id of the newest build that recorded changes.
+func lastChangedBuild(t *testing.T, d *app.Deps) (id int64) {
+	t.Helper()
+	if err := d.Pool.QueryRow(context.Background(), "SELECT max(build_id) FROM blocklist_changes").Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 func exec(t *testing.T, q db.Querier, sql string, args ...any) {
 	t.Helper()
 	if _, err := q.Exec(context.Background(), sql, args...); err != nil {
@@ -298,8 +327,22 @@ func testAPI(t *testing.T, d *app.Deps, s *Service) {
 	}
 	var lk api.BlocklistLookup
 	call("GET", "/api/v1/blocklist/lookup?name=WWW.D.com", "", 200, &lk)
-	if !lk.Blocked || lk.Match != "d.com" || lk.Name != "www.d.com" {
+	if !lk.Blocked || lk.Match != "d.com" || lk.Name != "www.d.com" || lk.BlockedSince == nil ||
+		len(lk.History) != 1 || !lk.History[0].Added || lk.History[0].Name != "d.com" {
 		t.Fatalf("lookup %+v", lk)
+	}
+	call("GET", "/api/v1/blocklist/lookup?name=x.b.com", "", 200, &lk) // whitelisted in an earlier build
+	if lk.Blocked || len(lk.History) != 1 || lk.History[0].Added || lk.History[0].Name != "b.com" {
+		t.Fatalf("lookup removed %+v", lk)
+	}
+	call("GET", "/api/v1/blocklist/lookup?name=c.com", "", 200, &lk) // listed since before tracking
+	if !lk.Blocked || lk.BlockedSince != nil || len(lk.History) != 0 {
+		t.Fatalf("lookup untracked %+v", lk)
+	}
+	var ch api.List[api.BlocklistChange]
+	call("GET", "/api/v1/blocklist/builds/"+strconv.FormatInt(lastChangedBuild(t, d), 10)+"/changes?q=d.c", "", 200, &ch)
+	if ch.Total != 1 || ch.Items[0].Name != "d.com" || !ch.Items[0].Added {
+		t.Fatalf("changes %+v", ch)
 	}
 	call("GET", "/api/v1/blocklist/lookup?name=bad%20name", "", 400, nil)
 

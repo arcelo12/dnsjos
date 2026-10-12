@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { LuHammer,
+import { useDeferredValue, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { LuChevronLeft, LuChevronRight, LuHammer,
   LuRefreshCw, LuPencil, LuPlus, LuSearch, LuShieldBan, LuShieldCheck, LuTrash2 } from 'react-icons/lu'
 import { toast } from 'sonner'
 
@@ -26,6 +26,7 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   api,
   qk,
+  useBlocklistChanges,
   useBlocklistLookup,
   useBlocklistSources,
   useBuildNow,
@@ -34,8 +35,8 @@ import {
   useUpdateSource,
 } from '@/lib/api/client'
 import type { BlocklistBuild, BlocklistLookup, BlocklistSource, BlocklistSourceKind } from '@/lib/api/types'
-import { fmtBytes, fmtDuration, fmtNumber, shortSha } from '@/lib/format'
-import { looksLikeIP } from '@/lib/utils'
+import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, shortSha } from '@/lib/format'
+import { cn, looksLikeIP } from '@/lib/utils'
 
 import { AllowDialog, AllowlistCard } from './Allowlist'
 
@@ -81,6 +82,7 @@ export default function BlocklistPage() {
   const { builds, current, running } = useBuildState()
   const buildNow = useBuildNow()
   const busy = running || buildNow.isPending
+  const [changesOf, setChangesOf] = useState<BlocklistBuild | null>(null)
   return (
     <>
       <PageHeader
@@ -132,7 +134,7 @@ export default function BlocklistPage() {
         </CardHeader>
         <CardContent>
           <DataTable
-            columns={buildColumns}
+            columns={buildColumns(setChangesOf)}
             rows={builds.data?.items}
             loading={builds.isPending}
             error={builds.error}
@@ -142,7 +144,99 @@ export default function BlocklistPage() {
           />
         </CardContent>
       </Card>
+      {changesOf && <ChangesDialog build={changesOf} onClose={() => setChangesOf(null)} />}
     </>
+  )
+}
+
+const CHANGES_PAGE = 200
+
+function ChangesDialog({ build, onClose }: { build: BlocklistBuild; onClose: () => void }) {
+  const [q, setQ] = useState('')
+  const [kind, setKind] = useState<'added' | 'removed' | ''>('')
+  const [offset, setOffset] = useState(0)
+  const query = useDeferredValue(q.trim().toLowerCase())
+  const { data, isPending, isPlaceholderData, error } = useBlocklistChanges(build.id, { q: query, kind: kind || undefined, limit: CHANGES_PAGE, offset })
+  const kinds = [
+    { id: '', label: 'All', count: build.added + build.removed },
+    { id: 'added', label: 'Added', count: build.added },
+    { id: 'removed', label: 'Removed', count: build.removed },
+  ] as const
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>
+            Build #{build.id} changes · <span className="text-success">+{fmtNumber(build.added)}</span>{' '}
+            <span className="text-destructive">−{fmtNumber(build.removed)}</span>
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex gap-2">
+          <div className="flex shrink-0 rounded-md border p-0.5" role="group" aria-label="Change type">
+            {kinds.map((k) => (
+              <Button
+                key={k.id}
+                type="button"
+                size="sm"
+                variant={kind === k.id ? 'secondary' : 'ghost'}
+                className="h-8 px-2.5"
+                aria-pressed={kind === k.id}
+                onClick={() => {
+                  setKind(k.id)
+                  setOffset(0)
+                }}
+              >
+                {k.label} <span className="tabular text-muted-foreground">{fmtNumber(k.count)}</span>
+              </Button>
+            ))}
+          </div>
+          <Input
+            value={q}
+            onChange={(e) => {
+              setQ(e.target.value)
+              setOffset(0)
+            }}
+            placeholder="Filter names"
+            aria-label="Filter changed names"
+          />
+        </div>
+        {isPending ? (
+          <Skeleton className="h-40 w-full" />
+        ) : error ? (
+          <p className="text-sm text-destructive">{error.message}</p>
+        ) : (
+          <>
+            <ul className={cn('max-h-96 overflow-y-auto rounded-md border font-mono text-xs', isPlaceholderData && 'opacity-60')}>
+              {data.items.map((c) => (
+                <li key={c.name} className="flex gap-2 border-b px-3 py-1.5 last:border-b-0">
+                  <span className={c.added ? 'text-success' : 'text-destructive'}>{c.added ? '+' : '−'}</span>
+                  <span className="break-all">{c.name}</span>
+                </li>
+              ))}
+              {data.items.length === 0 && <li className="px-3 py-4 text-center text-muted-foreground">No matching names</li>}
+            </ul>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <p className="flex-1">
+                {data.total ? `${fmtNumber(offset + 1)}–${fmtNumber(offset + data.items.length)}` : '0'} of {fmtNumber(data.total)}
+                {!query && !kind && data.total < build.added + build.removed && ' (very large changes keep only the first 500,000 names each way)'}
+              </p>
+              <Button type="button" variant="outline" size="sm" disabled={offset === 0 || isPlaceholderData} onClick={() => setOffset(Math.max(0, offset - CHANGES_PAGE))}>
+                <LuChevronLeft /> Prev
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={offset + CHANGES_PAGE >= data.total || isPlaceholderData}
+                onClick={() => setOffset(offset + CHANGES_PAGE)}
+              >
+                Next <LuChevronRight />
+              </Button>
+            </div>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -202,7 +296,7 @@ function CurrentBuildCard({ build, loading, running }: { build: BlocklistBuild |
   )
 }
 
-const buildColumns: Column<BlocklistBuild>[] = [
+const buildColumns = (onChanges: (b: BlocklistBuild) => void): Column<BlocklistBuild>[] => [
   { key: 'id', header: '#', cell: (b) => b.id, sortValue: (b) => b.id },
   {
     key: 'status',
@@ -214,6 +308,26 @@ const buildColumns: Column<BlocklistBuild>[] = [
   { key: 'started', header: 'Started', cell: (b) => <TimeAgo date={b.started_at} />, sortValue: (b) => b.started_at },
   { key: 'dur', header: 'Duration', cell: buildDuration },
   { key: 'domains', header: 'Domains', align: 'right', cell: (b) => fmtNumber(b.domains), sortValue: (b) => b.domains },
+  {
+    key: 'changes',
+    header: 'Changes',
+    align: 'right',
+    cell: (b) =>
+      b.status === 'ok' && (b.added || b.removed) ? (
+        <button
+          type="button"
+          className="font-mono text-xs whitespace-nowrap underline-offset-4 hover:underline"
+          title="Show the changed names"
+          onClick={() => onChanges(b)}
+        >
+          <span className="text-success">+{fmtNumber(b.added)}</span>{' '}
+          <span className="text-destructive">−{fmtNumber(b.removed)}</span>
+        </button>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
+    sortValue: (b) => b.added + b.removed,
+  },
   { key: 'ips', header: 'IPs', align: 'right', cell: (b) => fmtNumber(b.ips), sortValue: (b) => b.ips },
   { key: 'wl', header: 'Whitelisted', align: 'right', cell: (b) => fmtNumber(b.whitelisted), sortValue: (b) => b.whitelisted },
   { key: 'size', header: 'Size', align: 'right', cell: (b) => fmtBytes(b.size_bytes), sortValue: (b) => b.size_bytes },
@@ -285,8 +399,25 @@ function LookupResult({ r, onAllow }: { r: BlocklistLookup; onAllow: () => void 
         {r.blocked && (
           <div className="text-muted-foreground">
             matched <code className="font-mono break-all">{r.match}</code>
-            {r.match !== r.name && ' (parent suffix)'}
+            {r.match !== r.name && ' (parent suffix)'} ·{' '}
+            {r.blocked_since ? (
+              <span title={fmtDateTime(r.blocked_since)}>
+                listed since <TimeAgo date={r.blocked_since} />
+              </span>
+            ) : (
+              'listed since before change tracking began'
+            )}
           </div>
+        )}
+        {r.history.length > 0 && (
+          <ul className="space-y-0.5 text-xs text-muted-foreground">
+            {r.history.map((c) => (
+              <li key={`${c.build_id}:${c.name}`}>
+                <span className={c.added ? 'text-destructive' : 'text-success'}>{c.added ? 'added' : 'removed'}</span>{' '}
+                <code className="font-mono break-all">{c.name}</code> · build #{c.build_id} · {fmtDateTime(c.at)}
+              </li>
+            ))}
+          </ul>
         )}
         {r.allow_entry && (
           <div className="text-muted-foreground">

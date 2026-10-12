@@ -34,7 +34,7 @@ export function UserMenu({ className }: { className?: string }) {
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="icon" className={cn('rounded-full', className)} aria-label="Account">
             <Avatar className="size-8">
-              <AvatarFallback className="bg-brand-gold text-xs font-semibold text-sidebar-primary-foreground">{initials}</AvatarFallback>
+              <AvatarFallback className="bg-brand-accent text-xs font-semibold text-sidebar-primary-foreground">{initials}</AvatarFallback>
             </Avatar>
           </Button>
         </DropdownMenuTrigger>

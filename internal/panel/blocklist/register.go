@@ -42,6 +42,7 @@ func (s *Service) routes(r *app.Router) {
 	r.Admin("PATCH /api/v1/blocklist/sources/{id}", s.patchSource)
 	r.Admin("DELETE /api/v1/blocklist/sources/{id}", s.deleteSource)
 	r.Viewer("GET /api/v1/blocklist/builds", s.listBuilds)
+	r.Viewer("GET /api/v1/blocklist/builds/{id}/changes", s.listChanges)
 	r.Admin("POST /api/v1/blocklist/builds", s.startBuild)
 	r.Viewer("GET /api/v1/blocklist/current", s.current)
 	r.Viewer("GET /api/v1/blocklist/lookup", s.lookup)
@@ -228,6 +229,9 @@ func (s *Service) lookup(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = allowMatch(r.Context(), s.d.Pool, &res)
 	}
+	if err == nil {
+		err = s.history(r.Context(), &res)
+	}
 	if errors.Is(err, errBadName) {
 		httpx.BadRequest(w, err.Error())
 		return
@@ -236,6 +240,80 @@ func (s *Service) lookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, res)
+}
+
+const changeCols = "c.build_id, c.name, c.added, b.finished_at"
+
+func scanChanges(rows pgx.Rows) ([]api.BlocklistChange, error) {
+	items, err := pgx.CollectRows(rows, pgx.RowToStructByPos[api.BlocklistChange])
+	if items == nil {
+		items = []api.BlocklistChange{}
+	}
+	return items, err
+}
+
+// history fills res with the changes to res.Name and its parents (any of which blocks it).
+func (s *Service) history(ctx context.Context, res *api.BlocklistLookup) error {
+	names := []string{res.Name}
+	if _, err := netip.ParseAddr(res.Name); err != nil {
+		for n := res.Name; strings.Contains(n, "."); {
+			n = n[strings.IndexByte(n, '.')+1:]
+			names = append(names, n)
+		}
+	}
+	rows, _ := s.d.Pool.Query(ctx, "SELECT "+changeCols+` FROM blocklist_changes c
+		JOIN blocklist_builds b ON b.id = c.build_id WHERE c.name = ANY($1) ORDER BY c.build_id DESC LIMIT 50`, names)
+	var err error
+	if res.History, err = scanChanges(rows); err != nil {
+		return err
+	}
+	for _, c := range res.History {
+		if res.Blocked && c.Name == res.Match {
+			if c.Added {
+				res.BlockedSince = &c.At
+			}
+			break
+		}
+	}
+	return nil
+}
+
+// listChanges pages the names a build added/removed; q filters by substring.
+func (s *Service) listChanges(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	offset = max(offset, 0)
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	// kind: "added" | "removed" | "" (both, added first).
+	var added *bool
+	switch k := r.URL.Query().Get("kind"); k {
+	case "added", "removed":
+		v := k == "added"
+		added = &v
+	case "":
+	default:
+		httpx.BadRequest(w, "kind must be added or removed")
+		return
+	}
+	where := ` FROM blocklist_changes c JOIN blocklist_builds b ON b.id = c.build_id
+		WHERE c.build_id = $1 AND strpos(c.name, $2) > 0 AND ($3::boolean IS NULL OR c.added = $3)`
+	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+changeCols+where+" ORDER BY c.added DESC, c.name LIMIT $4 OFFSET $5",
+		id, q, added, limit, offset)
+	items, err := scanChanges(rows)
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	var total int
+	if err := s.d.Pool.QueryRow(r.Context(), "SELECT count(*)"+where, id, q, added).Scan(&total); err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, api.List[api.BlocklistChange]{Items: items, Total: total})
 }
 
 var errBadName = errors.New("not a valid domain name or IPv4 address")

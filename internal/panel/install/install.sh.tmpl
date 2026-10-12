@@ -1,6 +1,6 @@
 #!/bin/sh
 # DnsJos node installer (SPEC §13), served by the panel at /install.sh.
-#   curl -fsSL {{.PanelURL}}/install.sh | sudo sh -s -- --token TOKEN [--panel URL] [--adopt] [--no-start]
+#   curl -fsSL {{.PanelURL}}/install.sh | sudo sh -s -- --token TOKEN [--panel URL] [--adopt] [--no-start] [--with-unbound]
 # Idempotent: safe to re-run. Supports Debian 12/13 and Ubuntu 22.04/24.04 on amd64/arm64.
 set -eu
 
@@ -8,6 +8,8 @@ PANEL_URL='{{.PanelURL}}'
 TOKEN=''
 ADOPT=0
 NO_START=0
+WITH_UNBOUND=0
+UNBOUND_ADDR='127.0.0.1@5335' # local recursive resolver, set as the profile upstream 127.0.0.1:5335
 DNSDIST_SERIES='20' # dnsdist 2.0.x from repo.powerdns.com
 AGENT_BIN=/usr/local/bin/dnsjos-agent
 AGENT_CONF=/etc/dnsjos/agent.json
@@ -19,12 +21,14 @@ die() { printf 'dnsjos-install: error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
 	cat <<EOF
-usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start]
+usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start] [--with-unbound]
   --token TOKEN  enrollment token from the panel (Nodes -> Add node)
   --panel URL    panel URL (default: $PANEL_URL)
   --adopt        take over a live dnsdist server: keep its dnsdist package, secrets,
                  listeners and port 53 setup (no repo, no install/upgrade, no resolved changes)
   --no-start     install the agent service but do not start it (review with 'dnsjos-agent plan')
+  --with-unbound also install Unbound as a local recursive, DNSSEC-validating resolver on
+                 127.0.0.1:5335; point the profile upstreams at it to stop forwarding to public DNS
 EOF
 }
 
@@ -36,6 +40,7 @@ while [ $# -gt 0 ]; do
 		--panel=*) PANEL_URL=${1#--panel=}; shift ;;
 		--adopt) ADOPT=1; shift ;;
 		--no-start) NO_START=1; shift ;;
+		--with-unbound) WITH_UNBOUND=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage >&2; die "unknown argument: $1" ;;
 	esac
@@ -130,6 +135,93 @@ net.core.wmem_max = 16777216
 EOF
 sysctl -q -p /etc/sysctl.d/90-dnsjos.conf >/dev/null 2>&1 || true
 
+# DNS server tuning. Never lowers a value an operator already raised (90-dns.conf etc.).
+say "tuning the kernel and NIC for DNS"
+BACKLOG=$(sysctl -n net.core.netdev_max_backlog 2>/dev/null || echo 0)
+[ "$BACKLOG" -ge 16384 ] || BACKLOG=16384
+PORT_LO=$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null | awk '{print $1}')
+# A wider source port range only when no TCP service listens inside the ports it adds.
+WIDE_PORTS=1
+if [ "$PORT_LO" != 10000 ] &&
+	ss -Hltn 2>/dev/null | awk '{n = split($4, a, ":"); p = a[n] + 0; if (p >= 10000 && p < 32768) bad = 1} END {exit !bad}'; then
+	WIDE_PORTS=0
+fi
+{
+	echo "# DnsJos DNS node tuning, written by install.sh."
+	echo "net.core.netdev_max_backlog = $BACKLOG"
+	if [ "$WIDE_PORTS" = 1 ]; then
+		echo "# More source ports for recursive queries (spoofing resistance)."
+		echo "net.ipv4.ip_local_port_range = 10000 65535"
+	fi
+	echo "# Keep the dnsdist and Unbound caches in RAM."
+	echo "vm.swappiness = 10"
+	echo "# RFS for single-queue NICs (dnsjos-nic-tuning.service)."
+	echo "net.core.rps_sock_flow_entries = 32768"
+	if modprobe tcp_bbr 2>/dev/null; then
+		echo "# DoH/DoT over lossy/mobile links."
+		echo "net.core.default_qdisc = fq"
+		echo "net.ipv4.tcp_congestion_control = bbr"
+	fi
+} >/etc/sysctl.d/91-dnsjos-tuning.conf
+if grep -q '= bbr' /etc/sysctl.d/91-dnsjos-tuning.conf; then echo tcp_bbr >/etc/modules-load.d/dnsjos-bbr.conf; fi
+sysctl -q -p /etc/sysctl.d/91-dnsjos-tuning.conf >/dev/null 2>&1 || true
+# Transparent huge pages: madvise (no compaction stalls); CPUs at full clock on bare metal.
+: >/etc/tmpfiles.d/dnsjos-tuning.conf
+[ ! -w /sys/kernel/mm/transparent_hugepage/enabled ] ||
+	echo 'w /sys/kernel/mm/transparent_hugepage/enabled - - - - madvise' >>/etc/tmpfiles.d/dnsjos-tuning.conf
+! grep -qsw performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors ||
+	echo 'w /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor - - - - performance' >>/etc/tmpfiles.d/dnsjos-tuning.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/dnsjos-tuning.conf >/dev/null 2>&1 || true
+# NIC: spread DNS over every CPU, re-applied at boot.
+mkdir -p /usr/local/lib/dnsjos
+cat >/usr/local/lib/dnsjos/nic-tuning.sh <<'EOF'
+#!/bin/sh
+# Written by the DnsJos installer: spread DNS packets over every CPU.
+dev=$(ip -4 route show default | awk '{print $5; exit}')
+[ -n "$dev" ] || exit 0
+for l in /sys/class/net/"$dev"/lower_*; do [ -e "$l" ] && dev=${l##*/lower_}; done # VLAN: its NIC
+# Multi-queue NICs hash UDP on IPs only by default: one busy source pins one queue.
+if command -v ethtool >/dev/null 2>&1; then
+	ethtool -N "$dev" rx-flow-hash udp4 sdfn 2>/dev/null
+	ethtool -N "$dev" rx-flow-hash udp6 sdfn 2>/dev/null
+fi
+# Single-queue NICs (common on VMs): RPS/RFS spreads receive processing in software.
+n=$(nproc); [ "$n" -le 32 ] || n=32
+if [ "$(ls -d /sys/class/net/"$dev"/queues/rx-* | wc -l)" = 1 ] && [ "$n" -gt 1 ]; then
+	printf '%x\n' $(((1 << n) - 1)) >/sys/class/net/"$dev"/queues/rx-0/rps_cpus
+	echo 32768 >/sys/class/net/"$dev"/queues/rx-0/rps_flow_cnt
+fi
+exit 0
+EOF
+chmod 0755 /usr/local/lib/dnsjos/nic-tuning.sh
+cat >/etc/systemd/system/dnsjos-nic-tuning.service <<'EOF'
+[Unit]
+Description=DnsJos NIC tuning (UDP RSS on ports, RPS/RFS on single-queue NICs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/dnsjos/nic-tuning.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable dnsjos-nic-tuning.service >/dev/null 2>&1
+systemctl restart dnsjos-nic-tuning.service || true
+# default_qdisc only applies to new qdiscs: rebuild the NIC's root qdisc once now.
+NIC=$(ip -4 route show default | awk '{print $5; exit}')
+for l in /sys/class/net/"$NIC"/lower_*; do [ -e "$l" ] && NIC=${l##*/lower_}; done
+if [ -n "$NIC" ] && grep -q '= fq$' /etc/sysctl.d/91-dnsjos-tuning.conf && command -v tc >/dev/null 2>&1; then
+	case $(tc qdisc show dev "$NIC" | awk 'NR == 1 {print $2}') in
+	mq) tc qdisc replace dev "$NIC" root mq ;;
+	fq) ;;
+	*) tc qdisc replace dev "$NIC" root fq ;;
+	esac
+fi
+
 # ── 4. free port 53 from the systemd-resolved stub listener ─────────────────
 if [ "$ADOPT" = 0 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
 	if ! grep -rqs '^DNSStubListener=no' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d; then
@@ -143,6 +235,82 @@ if [ "$ADOPT" = 0 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null;
 		grep -qs '^nameserver 127\.0\.0\.53' /etc/resolv.conf; then
 		ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 	fi
+fi
+
+# ── 4b. optional Unbound recursive resolver on loopback ──────────────────────
+# Config goes in before the package so Unbound never starts on its default :53 (dnsdist's).
+if [ "$WITH_UNBOUND" = 1 ]; then
+	say "installing unbound on ${UNBOUND_ADDR%@*}:${UNBOUND_ADDR#*@}"
+	mkdir -p /etc/unbound/unbound.conf.d
+	# Sized from the host: a thread per core (power-of-two slabs to cut lock contention) and
+	# rrset cache = RAM/16 in 64m..1g, msg cache half that (Unbound uses ~2.5x the configured size).
+	UB_THREADS=$(nproc 2>/dev/null || echo 1)
+	[ "$UB_THREADS" -le 8 ] || UB_THREADS=8
+	UB_SLABS=1
+	while [ "$UB_SLABS" -lt "$UB_THREADS" ]; do UB_SLABS=$((UB_SLABS * 2)); done
+	UB_RRSET=$(awk '/^MemTotal:/ {m = int($2 / 1024 / 16); if (m < 64) m = 64; if (m > 1024) m = 1024; print m; exit}' /proc/meminfo)
+	UB_RRSET=${UB_RRSET:-128}
+	# Only use IPv6 name servers when IPv6 actually reaches the internet: a default route
+	# with a dead uplink makes every first lookup wait for IPv6 timeouts.
+	UB_IP6=no
+	if [ -n "$(ip -6 route show default 2>/dev/null)" ] &&
+		{ ping -6 -c 1 -W 2 2001:4860:4860::8888 || ping -6 -c 1 -W 2 2606:4700:4700::1111; } >/dev/null 2>&1; then
+		UB_IP6=yes
+	fi
+	cat >/etc/unbound/unbound.conf.d/dnsjos.conf <<EOF
+# Managed by the DnsJos installer: recursive resolver behind dnsdist, loopback only.
+# Re-run the installer with --with-unbound to resize after a CPU/RAM change.
+server:
+    interface: ${UNBOUND_ADDR}
+    access-control: 127.0.0.0/8 allow
+    do-ip6: ${UB_IP6}
+    hide-identity: yes
+    hide-version: yes
+
+    # threads and sockets
+    num-threads: ${UB_THREADS}
+    so-reuseport: yes
+    so-rcvbuf: 4m
+    so-sndbuf: 4m
+    outgoing-range: 8192
+    num-queries-per-thread: 4096
+    incoming-num-tcp: 256
+    outgoing-num-tcp: 64
+
+    # caches
+    msg-cache-slabs: ${UB_SLABS}
+    rrset-cache-slabs: ${UB_SLABS}
+    infra-cache-slabs: ${UB_SLABS}
+    key-cache-slabs: ${UB_SLABS}
+    rrset-cache-size: ${UB_RRSET}m
+    msg-cache-size: $((UB_RRSET / 2))m
+    key-cache-size: $((UB_RRSET / 8))m
+    neg-cache-size: $((UB_RRSET / 16))m
+    cache-max-negative-ttl: 300
+
+    # latency: refresh popular names before they expire, answer stale while refreshing
+    # (RFC 8767), and synthesize NXDOMAIN from cached NSEC (RFC 8198)
+    prefetch: yes
+    prefetch-key: yes
+    serve-expired: yes
+    serve-expired-ttl: 86400
+    serve-expired-client-timeout: 0
+    aggressive-nsec: yes
+    qname-minimisation: yes
+    rrset-roundrobin: yes
+    harden-below-nxdomain: yes
+EOF
+	# The package would point the host's resolv.conf at 127.0.0.1:53, where dnsdist (not Unbound) answers.
+	systemctl mask unbound-resolvconf.service >/dev/null 2>&1 || true
+	command -v unbound >/dev/null 2>&1 || {
+		apt-get update -q
+		# shellcheck disable=SC2086
+		apt-get install $APT_OPTS unbound
+	}
+	unbound-checkconf >/dev/null || die "unbound config check failed (unbound-checkconf)"
+	systemctl enable unbound >/dev/null 2>&1
+	systemctl restart unbound
+	say "unbound ready: set the profile upstream to ${UNBOUND_ADDR%@*}:${UNBOUND_ADDR#*@}"
 fi
 
 # ── 5. agent binary (sha256-verified) ───────────────────────────────────────

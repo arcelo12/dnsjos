@@ -7,7 +7,7 @@ import { createRequire } from 'node:module'
 
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_CORE || 'playwright-core')
 const BASE = process.env.PANEL || 'http://127.0.0.1:28080'
-const OUT = new URL('./screenshots/', import.meta.url).pathname
+const OUT = process.env.OUT || new URL('./screenshots/', import.meta.url).pathname
 const only = process.argv[2]
 mkdirSync(OUT, { recursive: true })
 
@@ -77,10 +77,10 @@ for (const theme of ['light', 'dark'])
 
     cur = `login-${theme}-${tag}`
     await p.goto(BASE + '/login')
-    await p.waitForTimeout(400)
+    await p.waitForTimeout(1200) // let the entrance animation settle
     if (!only || cur.includes(only)) await p.screenshot({ path: `${OUT}${cur}.png` })
     await p.getByLabel(/email/i).fill('admin@example.com')
-    await p.getByLabel(/password/i).fill('admin-pass-1')
+    await p.getByLabel('Password', { exact: true }).fill('admin-pass-1')
     await p.getByRole('button', { name: /sign in/i }).click()
     await p.waitForURL(BASE + '/')
 
@@ -95,7 +95,13 @@ for (const theme of ['light', 'dark'])
         await p.waitForTimeout(900) // charts animate / skeletons settle
         const over = await p.evaluate(() => document.documentElement.scrollWidth - innerWidth)
         if (over > 0) problems.push(`${cur} horizontal overflow ${over}px`)
-        await p.screenshot({ path: `${OUT}${cur}.png`, fullPage: true })
+        // Grow the viewport to the page instead of fullPage stitching: stitching keeps 100svh at the
+        // original height, so the fixed sidebar looked cut off halfway down long pages.
+        const h = await p.evaluate(() => document.documentElement.scrollHeight)
+        await p.setViewportSize({ width: vw, height: Math.max(vh, h) })
+        await p.waitForTimeout(150)
+        await p.screenshot({ path: `${OUT}${cur}.png` })
+        await p.setViewportSize({ width: vw, height: vh })
       } catch (e) {
         problems.push(`${cur} step failed: ${e.message.split('\n')[0]}`)
       }

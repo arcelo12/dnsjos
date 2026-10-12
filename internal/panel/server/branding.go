@@ -38,6 +38,14 @@ func registerBranding(r *app.Router, cfg brand) {
 		}
 	})
 	r.Public("GET /manifest.webmanifest", cfg.manifest)
+	// The brand's design-token overrides. index.html links it render-blocking so the brand
+	// palette is there on first paint; without a brand file it is an empty stylesheet, not a 404.
+	r.Public("GET /brand-theme.css", func(w http.ResponseWriter, req *http.Request) {
+		if !cfg.serve(w, req, "theme.css", "no-cache") {
+			w.Header().Set("Content-Type", api.BrandingFiles["theme.css"])
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+	})
 }
 
 // open returns an allowlisted, regular brand file. The allowlist is exact file names, so
