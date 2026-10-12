@@ -143,9 +143,9 @@ The full initial schema is `migrations/0001_init.up.sql`. Summary:
   created_at, published bool)` unique(profile_id, version). `spec` is `api.ConfigSpec`.
 * `nodes.profile_id → config_profiles` and optional `nodes.overrides jsonb` (per-node
   values merged over the profile: listen IPs, weights, etc. — see §6.3).
-* `blocklist_sources(id, name, kind 'trustpositif_domains'|'trustpositif_ips'|'url_domains'|'url_ips'|'manual_domains'|'manual_ips'|'whitelist', url, content text, enabled, etag, last_modified, last_fetch_at, last_status, entries int)`
-* `blocklist_builds(id bigserial, started_at, finished_at, status 'running'|'ok'|'failed'|'skipped', domains int, ips int, whitelisted int, size_bytes bigint, sha256 text, error text, trigger 'schedule'|'manual')`
-  — the newest `ok` build is "current". Artifact file: `$DATA_DIR/blocklist/<sha256>.cdb`.
+* `blocklist_sources(id, name, kind 'trustpositif_domains'|'trustpositif_ips'|'url_domains'|'url_ips'|'manual_domains'|'manual_ips'|'whitelist', url, content text, enabled, profile_id uuid NULL → config_profiles, etag, last_modified, last_fetch_at, last_status, entries int)`
+* `blocklist_builds(id bigserial, started_at, finished_at, status 'running'|'ok'|'failed'|'skipped', profile_id uuid NULL → config_profiles, domains int, ips int, whitelisted int, size_bytes bigint, sha256 text, error text, trigger 'schedule'|'manual')`
+  — `profile_id IS NULL` is the global scope; the newest `ok` build **of a scope** is its "current" build. Artifact file: `$DATA_DIR/blocklist/<sha256>.cdb` (shared by any scope that produces identical content).
 * `metrics_minutely(node_id, ts timestamptz (minute), queries, responses, cache_hits,
   cache_misses, blocked, dyn_blocked, rule_drops, servfail, nxdomain, noerror,
   latency_avg_ms real, cgk_rewrites, pk(node_id, ts))` — retention 35 days.
@@ -546,6 +546,12 @@ Defaults seeded by migration: TrustPositif domains
 `https://trustpositif.komdigi.go.id/assets/db/ipaddress_isp`. Admins can add URL lists,
 manual lists (textarea) and a whitelist.
 
+**Profiles.** Every source belongs to a scope: `profile_id IS NULL` is **global** and is
+shared by every profile, a non-null `profile_id` scopes the source to that one config
+profile. A profile therefore blocks the union of the global and its own sources; a source
+can be moved between scopes with `PATCH /blocklist/sources/{id}`. The blocklist page
+exposes a profile selector so an operator creates and manages per-profile blocklists.
+
 Fetch with a browser User-Agent, `If-None-Match` / `If-Modified-Since`, 120 s timeout,
 streaming (never hold the 220 MB body in memory as a string).
 
@@ -564,7 +570,11 @@ same fields (`bytes`, `seconds`, `mb_per_s`, `streams`) are logged.
 
 ### 7.2 Build
 
-* Schedule: every 3 h (setting), plus "Build now" button.
+* Schedule: every 3 h (setting), plus "Build now" button. Each scope (global, and every
+  profile that owns an enabled source) builds on its own clock and into its own CDB.
+* A scope builds from its own sources **plus** the global ones; sources scoped to another
+  profile are never included. The fingerprint is kept per scope, so an unchanged scope is
+  skipped even when another scope rebuilt.
 * If every URL source returns 304 and manual/whitelist unchanged → build `skipped`.
 * A 304 on one source must **not** drop that source: keep the last successful raw
   download of every URL source on disk (`$DATA_DIR/blocklist/sources/<id>.txt`) and always
@@ -591,9 +601,11 @@ expanded only if ≤ /24 (≤ 256 keys), larger ones are skipped and counted.
 
 ### 7.4 Serving
 
-`GET /agent/v1/blocklist` → 200 with the current CDB (`ETag: "<sha256>"`,
-`X-Dnsjos-Sha256`, `Content-Length`), 304 on matching `If-None-Match`. Served with
-`http.ServeContent` (supports Range, so agents can resume).
+`GET /agent/v1/blocklist` → 200 with the CDB the node's profile should run: the profile's
+own newest `ok` build, or the global build when the profile has none of its own (`ETag:
+"<sha256>"`, `X-Dnsjos-Sha256`, `Content-Length`), 304 on matching `If-None-Match`. Served
+with `http.ServeContent` (supports Range, so agents can resume). A `?profile_id=` query
+parameter overrides the node's own scope (empty = global).
 
 ---
 
@@ -780,8 +792,9 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `POST /api/v1/profiles/{id}/versions/{v}/publish` | → `ConfigVersion`; `?staged=true` = one node at a time (§6.5): 422 `invalid_rollout`, 409 `upgrade_running`/`nodes_not_ready`, `Location` of the run. A plain publish clears the profile's pins; 409 `upgrade_running` while a config run of that profile is active |
 | `GET /api/v1/profiles/{id}/versions/{a}/diff/{b}` | `ConfigVersionDiff{a,b,changes}` — both versions plus `SpecChange{path,op,old,new}` entries turning a into b |
 | `POST /api/v1/profiles/{id}/preview` | `PreviewRequest{spec}` (validated, not saved) → `RenderedConfig` |
-| `GET/POST /api/v1/blocklist/sources` · `PATCH/DELETE /blocklist/sources/{id}` | `List[BlocklistSource]` · `BlocklistSourceCreate` → 201 `BlocklistSource` · `BlocklistSourcePatch` → `BlocklistSource` · 204 |
-| `GET /api/v1/blocklist/builds` · `POST /blocklist/builds` · `GET /blocklist/current` | `List[BlocklistBuild]` (newest first) · build now → 202 `BlocklistBuild` · current `BlocklistBuild` or `null` |
+| `GET/POST /api/v1/blocklist/sources` · `PATCH/DELETE /blocklist/sources/{id}` | `List[BlocklistSource]` · `BlocklistSourceCreate{...,profile_id?}` → 201 `BlocklistSource` · `BlocklistSourcePatch{...,profile_id?}` → `BlocklistSource` · 204. `?profile_id=` (empty = global) filters by scope; `profile_id` on a source/build is `""` for the global scope plus the owning `profile_name` |
+| `GET /api/v1/blocklist/builds` · `POST /blocklist/builds` · `GET /blocklist/current` | `List[BlocklistBuild]` (newest first) · build now → 202 `BlocklistBuild` · current `BlocklistBuild` or `null`. `?profile_id=` (empty = global) scopes the list, the trigger and the lookup; omitted = every scope (POST builds the global scope) |
+| `GET /api/v1/blocklist/profiles` | `List[BlocklistProfile{id,name,description,source_count,own_build,effective_build,uses_global}]` — every config profile with its blocklist scope; `uses_global` when it has no build of its own and is served the global one |
 | `GET /api/v1/blocklist/lookup?name=` | `BlocklistLookup{name,blocked,match,allowed,allow_entry}` (checks current CDB incl. suffix walk; `allowed`/`allow_entry` = the most specific active allowlist entry covering the name or IP, else `false`/`null`) |
 | `GET /api/v1/allowlist` · `POST` · `DELETE /allowlist/{id}` | `List[AllowEntry{id,kind,value,reason,created_by_email,created_at,expires_at}]` (active entries, newest first) · admin: `AllowEntryCreate{kind,value,reason,expires_at?}` → 201 `AllowEntry` (value normalized; 422 `invalid_entry` for a bad kind/value, a TLD, a too-broad prefix, reason > 1000 bytes or an expiry not in the future; 409 `conflict` when the entry is already active — an expired row is replaced) · admin: 204 (404 unknown). Audited as `allowlist.create` / `allowlist.delete` (§7.5) |
 | `GET /api/v1/reports/blocked?from&to&node_id&limit` | `BlockedReport{total,by_node,by_month,top_domains}` (`from`/`to` are dates `YYYY-MM-DD`) |
