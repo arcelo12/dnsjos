@@ -29,5 +29,5 @@ logo_*.png
 /webdist/dist/
 
 # generated test artifacts
-/test/ui/screenshots/
+/test/ui/screenshots*/
 /test/**/output/

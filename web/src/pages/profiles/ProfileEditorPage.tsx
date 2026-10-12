@@ -145,6 +145,7 @@ function Editor({ profile, versions, latest }: { profile: Profile; versions: Con
     <SpecErrorsContext value={errors}>
       <ReadOnlyContext value={!isAdmin}>
         <PageHeader
+        identifier
           title={profile.name}
           description={
             <span className="flex flex-wrap items-center gap-2">

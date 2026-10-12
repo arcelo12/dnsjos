@@ -61,6 +61,7 @@ export default function NodeDetailPage() {
   return (
     <>
       <PageHeader
+        identifier
         title={node.name}
         description={
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">

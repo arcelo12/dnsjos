@@ -12,12 +12,13 @@ import {
   LuSlidersHorizontal,
   LuUsers,
 } from 'react-icons/lu'
-import { Link, Outlet, useMatch, useMatches } from 'react-router'
+import { Link, Outlet, useLocation, useMatch, useMatches } from 'react-router'
 
 import { Separator } from '@/components/ui/separator'
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -32,6 +33,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { useOverview } from '@/lib/api/client'
+import { fmtQps } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { useAuth } from './auth'
 import { BrandHead, BrandIcon, Cloud, useBranding } from './branding'
@@ -74,9 +76,9 @@ const groups: { label: string; items: NavItem[]; admin?: boolean }[] = [
   },
 ]
 
-// Active item: gold accent bar on the left edge plus the sidebar-accent highlight.
+// Active item: a verdigris hairline on the left edge, the row gently lifted, the icon in the accent.
 const activeBar =
-  "relative data-[active=true]:bg-sidebar-accent data-[active=true]:before:absolute data-[active=true]:before:inset-y-1 data-[active=true]:before:left-0 data-[active=true]:before:w-[3px] data-[active=true]:before:rounded-r-full data-[active=true]:before:bg-brand-gold data-[active=true]:before:content-['']"
+  "relative transition-colors duration-500 ease-(--ease-lux) [&>svg]:transition-colors [&>svg]:duration-500 data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:[&>svg]:text-brand-accent data-[active=true]:before:absolute data-[active=true]:before:inset-y-2 data-[active=true]:before:-left-2 data-[active=true]:before:w-px data-[active=true]:before:bg-linear-to-b data-[active=true]:before:from-transparent data-[active=true]:before:via-brand-accent data-[active=true]:before:to-transparent data-[active=true]:before:content-['']"
 
 function NavEntry({ item }: { item: NavItem }) {
   const { isMobile, setOpenMobile } = useSidebar()
@@ -101,7 +103,10 @@ function Brand() {
       {assets.navbar_dark ? (
         <img src={assets.navbar_dark} alt="" className="h-11 w-auto max-w-full object-contain object-left group-data-[collapsible=icon]:hidden" />
       ) : (
-        <span className="truncate text-lg font-semibold tracking-tight group-data-[collapsible=icon]:hidden">{name}</span>
+        <span className="flex min-w-0 flex-col leading-none group-data-[collapsible=icon]:hidden">
+          <span className="truncate font-display text-[1.4rem]">{name}</span>
+          <span className="mt-1 text-[9.5px] tracking-[0.28em] text-brand-accent/80 uppercase">Fleet control</span>
+        </span>
       )}
     </Link>
   )
@@ -113,23 +118,49 @@ function FleetPill() {
   if (!data) return null
   const n = data.nodes
   const tone = n.offline
-    ? 'border-red-400/40 bg-red-500/20 text-red-100 [--dot:var(--color-red-400)]'
+    ? 'border-red-300/30 bg-red-400/10 text-red-100 [--dot:var(--color-red-300)]'
     : n.degraded
-      ? 'border-amber-300/40 bg-amber-400/15 text-amber-100 [--dot:var(--color-amber-300)]'
-      : 'border-emerald-300/30 bg-emerald-400/10 text-emerald-50 [--dot:var(--color-emerald-400)]'
+      ? 'border-amber-200/30 bg-amber-300/10 text-amber-50 [--dot:var(--color-amber-200)]'
+      : 'border-brand-accent/25 bg-brand-accent/5 text-brand-ink-foreground [--dot:var(--brand-accent)]'
   return (
     <Link
       to="/nodes"
       className={cn(
-        'flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium whitespace-nowrap outline-hidden hover:brightness-125 focus-visible:ring-2 focus-visible:ring-brand-gold',
+        'flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium whitespace-nowrap outline-hidden hover:brightness-125 focus-visible:ring-2 focus-visible:ring-brand-accent',
         tone,
       )}
     >
-      <span aria-hidden className="mr-0.5 size-2 rounded-full bg-(--dot)" />
+      <span aria-hidden className="mr-0.5 size-1.5 rounded-full bg-(--dot)" />
       <span className="tabular">
         {n.online ?? 0}/{data.nodes_total}
       </span>
       <span className="sr-only sm:not-sr-only">nodes online</span>
+    </Link>
+  )
+}
+
+/** Sidebar footer: fleet availability as a serif figure over a hairline gauge. */
+function FleetSummary() {
+  const { data } = useOverview()
+  if (!data) return null
+  const online = data.nodes.online ?? 0
+  const pct = data.nodes_total ? (online / data.nodes_total) * 100 : 0
+  return (
+    <Link
+      to="/nodes"
+      className="block space-y-2.5 rounded-lg border border-sidebar-border bg-sidebar/85 p-3 backdrop-blur-sm outline-hidden transition-colors duration-500 hover:border-brand-accent/35 focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+    >
+      <span className="flex items-baseline justify-between">
+        <span className="text-[9.5px] tracking-[0.28em] text-brand-ink-muted uppercase">Fleet</span>
+        <span className="text-[11px] text-brand-ink-muted tabular">{fmtQps(data.qps)}</span>
+      </span>
+      <span className="block font-display text-3xl leading-none tabular">
+        {online}
+        <span className="text-lg text-brand-ink-muted"> / {data.nodes_total} online</span>
+      </span>
+      <span className="block h-px bg-white/10">
+        <span className="block h-px bg-linear-to-r from-brand-accent/40 to-brand-accent transition-[width] duration-1000 ease-(--ease-lux)" style={{ width: `${pct}%` }} />
+      </span>
     </Link>
   )
 }
@@ -145,11 +176,13 @@ function useTitle() {
 }
 
 // Controls sitting on the navy top bar.
-const onNavy = 'text-brand-navy-foreground hover:bg-white/10 hover:text-white dark:hover:bg-white/10 focus-visible:ring-brand-gold/60'
+const onNavy = 'text-brand-ink-foreground hover:bg-white/10 hover:text-white dark:hover:bg-white/10 focus-visible:ring-brand-accent/60'
 
 export function AppLayout() {
   const { isAdmin } = useAuth()
   const title = useTitle()
+  const { pathname } = useLocation()
+  const group = groups.find((g) => g.items.some((it) => (it.to === '/' ? pathname === '/' : pathname.startsWith(it.to))))?.label
   return (
     <SidebarProvider>
       <BrandHead title={title} />
@@ -162,7 +195,7 @@ export function AppLayout() {
             .filter((g) => isAdmin || !g.admin)
             .map((g) => (
               <SidebarGroup key={g.label}>
-                <SidebarGroupLabel className="text-brand-navy-muted">{g.label}</SidebarGroupLabel>
+                <SidebarGroupLabel className="text-[9.5px] tracking-[0.28em] text-brand-ink-muted/80 uppercase">{g.label}</SidebarGroupLabel>
                 <SidebarGroupContent>
                   <SidebarMenu>
                     {g.items.map((it) => (
@@ -173,15 +206,26 @@ export function AppLayout() {
               </SidebarGroup>
             ))}
         </SidebarContent>
+        <SidebarFooter className="relative z-10 group-data-[collapsible=icon]:hidden">
+          <FleetSummary />
+        </SidebarFooter>
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-56 bg-[radial-gradient(ellipse_at_10%_0%,oklch(0.82_0.065_178/0.09),transparent_70%)]" />
         <Cloud className="bottom-0 left-0 w-full opacity-15 group-data-[collapsible=icon]:hidden" />
         <SidebarRail />
       </Sidebar>
       <SidebarInset className="min-w-0">
-        <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 overflow-hidden bg-brand-navy px-3 text-brand-navy-foreground shadow-sm">
+        <header className="sticky top-0 z-20 flex h-12 shrink-0 items-center gap-2 overflow-hidden bg-brand-ink/95 px-3 text-brand-ink-foreground backdrop-blur">
+          <span aria-hidden className="absolute inset-x-0 bottom-0 h-px bg-linear-to-r from-transparent via-brand-accent/35 to-transparent" />
           <Cloud className="top-1/2 right-0 w-64 -translate-y-1/2 opacity-15" />
           <SidebarTrigger className={cn('-ml-1', onNavy)} />
           <Separator orientation="vertical" className="mr-1 bg-white/20 data-[orientation=vertical]:h-4" />
-          <h2 className="truncate text-sm font-medium">{title}</h2>
+          <h2 className="flex min-w-0 items-baseline gap-2 truncate text-sm font-medium">
+            {group && <span className="hidden text-[10px] tracking-[0.24em] text-brand-ink-muted uppercase sm:inline">{group}</span>}
+            {group && <span aria-hidden className="hidden text-brand-accent/60 sm:inline">·</span>}
+            <span key={title} className="animate-in font-display text-xl duration-700 ease-(--ease-lux) fade-in">
+              {title}
+            </span>
+          </h2>
           <div className="relative ml-auto flex items-center gap-1">
             <FleetPill />
             <ThemeToggle className={onNavy} />
@@ -189,7 +233,7 @@ export function AppLayout() {
           </div>
         </header>
         {/* SidebarInset is already the <main> landmark */}
-        <div className="mx-auto w-full max-w-[1600px] flex-1 space-y-6 p-4 md:p-6">
+        <div key={pathname} className="stagger mx-auto w-full max-w-[1600px] flex-1 space-y-6 p-4 md:p-6">
           <Outlet />
         </div>
       </SidebarInset>

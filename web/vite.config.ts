@@ -11,6 +11,6 @@ export default defineConfig({
   resolve: { alias: { '@': path.resolve(import.meta.dirname, './src') } },
   build: { outDir: 'dist', emptyOutDir: true, chunkSizeWarningLimit: 800 },
   server: {
-    proxy: Object.fromEntries(['/api', '/agent', '/install.sh', '/dl', '/healthz'].map((p) => [p, panel])),
+    proxy: Object.fromEntries(['/api', '/agent', '/install.sh', '/dl', '/healthz', '/brand-theme.css', '/branding'].map((p) => [p, panel])),
   },
 })

@@ -779,6 +779,7 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `GET /api/v1/branding` | public: `Branding{name, tagline, assets}` — `assets` has every `api.BrandingAssets` key (`login_logo`, `navbar_light`, `navbar_dark`, `login_bg`, `login_bg_mobile`, `cloud`, `favicon_ico`, `icon_192`, `icon_512`, `apple_touch`), each `/branding/<file>?v=<mtime>` or `null` when the file is absent (§15) |
 | `GET /branding/{file}` | public: a file from `DNSJOS_BRAND_DIR`, only the names in `api.BrandingFiles` (correct `Content-Type`, `Cache-Control: public, max-age=86400`); anything else 404 |
 | `GET /favicon.ico` · `GET /manifest.webmanifest` | public: the brand `favicon.ico`, else a neutral built-in icon · web manifest with the brand name and `icon-192/512.png` (else `/favicon.ico`) |
+| `GET /brand-theme.css` | public: the brand `theme.css` (design-token overrides: `--brand-ink`, `--brand-accent`, `--primary`, `--sans-font`, `--display-font`, …; see `web/src/index.css`), else an empty stylesheet; `Cache-Control: no-cache`. Linked render-blocking from `index.html` |
 
 Every mutating admin action writes `audit_log`.
 
@@ -886,7 +887,7 @@ Never touches an existing `/etc/dnsdist` without backing it up first.
 | `DNSJOS_LOG_LEVEL` | `info` |
 | `DNSJOS_BRAND_NAME` | `DnsJos` (UI name; also the SPA `<title>`, set server-side) |
 | `DNSJOS_BRAND_TAGLINE` | empty |
-| `DNSJOS_BRAND_DIR` | `$DNSJOS_DATA_DIR/branding` — operator-provided images (§10 `/branding/{file}`); the repository ships none |
+| `DNSJOS_BRAND_DIR` | `$DNSJOS_DATA_DIR/branding` — operator-provided images and optional `theme.css` (§10 `/branding/{file}`, `/brand-theme.css`); the repository ships none |
 
 ---
 

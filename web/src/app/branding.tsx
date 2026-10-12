@@ -53,10 +53,31 @@ export function BrandHead({ title }: { title?: string }) {
   return null
 }
 
-/** Square app icon: the brand icon, else the neutral default. */
+/** Square app icon: the brand icon, else the neutral mark. */
 export function BrandIcon({ className }: { className?: string }) {
   const { assets } = useBranding()
   return <img src={assets.icon_192 ?? '/favicon.svg'} alt="" className={cn('size-8 shrink-0 rounded-lg', className)} />
+}
+
+/** Login ornament: hairline verdigris orbits; one point travels the middle ring once a minute. */
+export function Orbits({ className }: { className?: string }) {
+  return (
+    <div aria-hidden className={cn('pointer-events-none relative aspect-square select-none', className)}>
+      {[1, 0.78, 0.56, 0.34].map((s, i) => (
+        <div
+          key={s}
+          className="absolute rounded-full border border-brand-accent/[var(--o)]"
+          style={{ inset: `${(1 - s) * 50}%`, ['--o' as string]: `${[8, 14, 20, 12][i]}%` }}
+        />
+      ))}
+      <div className="absolute inset-[11%] animate-orbit">
+        <span className="absolute top-0 left-1/2 size-1.5 -translate-1/2 rounded-full bg-brand-accent shadow-[0_0_14px_2px_oklch(0.82_0.065_178/0.6)]" />
+      </div>
+      <div className="absolute inset-[33%] animate-orbit [animation-direction:reverse] [animation-duration:90s]">
+        <span className="absolute top-1/2 right-0 size-1 translate-x-1/2 -translate-y-1/2 rounded-full bg-brand-accent/70" />
+      </div>
+    </div>
+  )
 }
 
 /** Decorative cloud ornament (only when the brand ships one). */

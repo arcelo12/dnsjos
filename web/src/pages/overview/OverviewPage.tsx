@@ -23,7 +23,7 @@ export default function OverviewPage() {
     <>
       <PageHeader title="Overview" description="Fleet health at a glance." />
       {ov.error && <p className="text-sm text-destructive">Could not load the overview: {ov.error.message}</p>}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      <div className="stagger grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <StatCard
           title="Nodes online"
           icon={LuServer}
