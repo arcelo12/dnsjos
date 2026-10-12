@@ -222,6 +222,7 @@ export interface Heartbeat {
   agent_version: string
   dnsdist_version: string
   os: string
+  public_ipv6?: string // outbound IPv6 source address; absent from older agents, "" without IPv6
   uptime_s: number
   dnsdist_running: boolean
   applied_config_version: number

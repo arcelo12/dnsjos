@@ -6,6 +6,7 @@ package speedcheck
 import (
 	"context"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -141,13 +142,18 @@ func Names(list []string) []string {
 
 // IPv6Ready reports whether this node has an IPv6 route at all (smartdns disables every
 // IPv6 feature without one): otherwise every IPv6 check fails.
-func IPv6Ready() bool {
+func IPv6Ready() bool { return OutboundIPv6().IsValid() }
+
+// OutboundIPv6 is the source address the kernel picks for IPv6 traffic to the internet
+// (the zero Addr without an IPv6 route).
+func OutboundIPv6() netip.Addr {
 	c, err := net.Dial("udp6", "[2001:4860:4860::8888]:53") // no packet is sent
 	if err != nil {
-		return false
+		return netip.Addr{}
 	}
-	c.Close()
-	return true
+	defer c.Close()
+	ap, _ := netip.ParseAddrPort(c.LocalAddr().String())
+	return ap.Addr().WithZone("")
 }
 
 // NetProber resolves through Resolver (ip:port, the node's upstream) and probes over the

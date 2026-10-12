@@ -67,6 +67,7 @@ export default function NodeDetailPage() {
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <StatusBadge status={node.status} />
             <span className="font-mono">{node.public_ip || '—'}</span>
+            {hb?.public_ipv6 && <span className="font-mono">{hb.public_ipv6}</span>}
             {node.hostname && <span>{node.hostname}</span>}
             <span>
               profile <b className="font-medium text-foreground">{node.profile_name || '—'}</b>

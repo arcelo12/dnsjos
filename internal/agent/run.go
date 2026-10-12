@@ -354,6 +354,9 @@ func loopback(listen string) string {
 func (a *agent) collectHeartbeat(ctx context.Context) *api.Heartbeat {
 	hb := &api.Heartbeat{Time: time.Now().UTC(), AgentVersion: a.o.Version, OS: a.os,
 		BlocklistSHA256: a.bl.Local(), System: collect.System(a.o.path(DataDir))}
+	if ip := speedcheck.OutboundIPv6(); ip.IsGlobalUnicast() && !ip.IsPrivate() {
+		hb.PublicIPv6 = ip.String()
+	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	collect.Dnsdist(cctx, dnsdist.Web{URL: a.webURL(), APIKey: a.sec.WebAPIKey}, hb)
 	cancel()

@@ -648,7 +648,7 @@ as before.
 ```jsonc
 {
   "time": "RFC3339",
-  "agent_version": "…", "dnsdist_version": "…", "os": "…", "uptime_s": 0,
+  "agent_version": "…", "dnsdist_version": "…", "os": "…", "public_ipv6": "", "uptime_s": 0,
   "dnsdist_running": true,
   "applied_config_version": 12, "apply_error": "",
   "blocklist_sha256": "…", "blocklist_error": "",
