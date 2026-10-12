@@ -71,33 +71,48 @@ func isURLKind(k string) bool {
 func isDomainKind(k string) bool { return strings.HasSuffix(k, "_domains") }
 func isIPKind(k string) bool     { return strings.HasSuffix(k, "_ips") }
 
-const buildCols = "id, started_at, finished_at, status, trigger, domains, ips, whitelisted, skipped, size_bytes, sha256, error, added, removed"
+const buildCols = `b.id, b.profile_id::text, coalesce(p.name, ''), b.started_at, b.finished_at, b.status, b.trigger, b.domains, b.ips, b.whitelisted, b.skipped, b.size_bytes, b.sha256, b.error, b.added, b.removed`
+
+// buildFrom joins the owning profile so a build row carries its name. Every query that
+// selects buildCols must use this FROM.
+const buildFrom = `FROM blocklist_builds b LEFT JOIN config_profiles p ON p.id = b.profile_id`
 
 func scanBuild(row pgx.Row) (api.BlocklistBuild, error) {
 	var b api.BlocklistBuild
-	err := row.Scan(&b.ID, &b.StartedAt, &b.FinishedAt, &b.Status, &b.Trigger, &b.Domains, &b.IPs,
+	err := row.Scan(&b.ID, &b.ProfileID, &b.ProfileName, &b.StartedAt, &b.FinishedAt, &b.Status, &b.Trigger, &b.Domains, &b.IPs,
 		&b.Whitelisted, &b.Skipped, &b.SizeBytes, &b.SHA256, &b.Error, &b.Added, &b.Removed)
 	return b, err
 }
 
-// Current returns the newest ok build, or nil when there is none.
-func Current(ctx context.Context, q db.Querier) (*api.BlocklistBuild, error) {
-	b, err := scanBuild(q.QueryRow(ctx, "SELECT "+buildCols+
-		" FROM blocklist_builds WHERE status = 'ok' ORDER BY finished_at DESC LIMIT 1"))
+// ProfileID is the empty string for the global scope. It keys every query that has to
+// pick one scope apart from the others.
+//
+// scopeWhere builds a "profile_id IS NULL" / "profile_id = $n" predicate on a column.
+func scopeWhere(col string, n int) string {
+	return fmt.Sprintf("(%s IS NULL AND $%d = '') OR %s = nullif($%d, '')::uuid", col, n, col, n)
+}
+
+// Current returns the newest ok build for one scope, or nil when there is none. An empty
+// profileID is the global build. It never falls back: the fallback belongs to serving, so
+// the UI can still tell "this profile has no build of its own" apart from "it uses global".
+func Current(ctx context.Context, q db.Querier, profileID string) (*api.BlocklistBuild, error) {
+	b, err := scanBuild(q.QueryRow(ctx, "SELECT "+buildCols+" "+buildFrom+
+		" WHERE b.status = 'ok' AND "+scopeWhere("b.profile_id", 1)+" ORDER BY b.finished_at DESC LIMIT 1", profileID))
 	if db.IsNotFound(err) {
 		return nil, nil
 	}
 	return &b, err
 }
 
-// Start runs a build in the background and returns its running row; errBusy when
-// a build is already in progress. force re-downloads every URL source (no
-// conditional request) and rebuilds even when the inputs are unchanged.
-func (s *Service) Start(trigger string, force bool) (api.BlocklistBuild, error) {
+// Start runs a build for one scope in the background and returns its running row; errBusy
+// when a build is already in progress. profileID is "" for the global build. force
+// re-downloads every URL source (no conditional request) and rebuilds even when the inputs
+// are unchanged.
+func (s *Service) Start(trigger, profileID string, force bool) (api.BlocklistBuild, error) {
 	if !s.mu.TryLock() {
 		return api.BlocklistBuild{}, errBusy
 	}
-	b, err := s.insert(context.Background(), trigger)
+	b, err := s.insert(context.Background(), trigger, profileID)
 	if err != nil {
 		s.mu.Unlock()
 		return b, err
@@ -106,38 +121,62 @@ func (s *Service) Start(trigger string, force bool) (api.BlocklistBuild, error) 
 		defer s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 		defer cancel()
-		if _, err := s.execute(ctx, b.ID, force); err != nil {
-			s.d.Log.Error("blocklist build", "id", b.ID, "err", err)
+		if _, err := s.execute(ctx, b.ID, profileID, force); err != nil {
+			s.d.Log.Error("blocklist build", "id", b.ID, "profile", profileID, "err", err)
 		}
 	}()
 	return b, nil
 }
 
-// tick is the scheduled job: builds once the configured interval has passed.
+// tick is the scheduled job: rebuilds every scope whose interval has passed. The global
+// build and each profile that owns at least one source are separate scopes.
 func (s *Service) tick(ctx context.Context) error {
-	var last *time.Time
-	if err := s.d.Pool.QueryRow(ctx, "SELECT max(started_at) FROM blocklist_builds").Scan(&last); err != nil {
-		return err
-	}
 	every := time.Duration(s.d.Settings.Get().BlocklistBuildIntervalMinutes) * time.Minute
-	if last != nil && time.Since(*last) < every {
-		return nil
+	for _, profileID := range s.scopes(ctx) {
+		var last *time.Time
+		if err := s.d.Pool.QueryRow(ctx, "SELECT max(started_at) FROM blocklist_builds WHERE "+scopeWhere("profile_id", 1),
+			profileID).Scan(&last); err != nil {
+			return err
+		}
+		if last != nil && time.Since(*last) < every {
+			continue
+		}
+		if !s.mu.TryLock() {
+			return nil // a build is running; the next tick retries
+		}
+		b, err := s.insert(ctx, "schedule", profileID)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		_, err = s.execute(ctx, b.ID, profileID, false)
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
-	if !s.mu.TryLock() {
-		return nil
-	}
-	defer s.mu.Unlock()
-	b, err := s.insert(ctx, "schedule")
-	if err != nil {
-		return err
-	}
-	_, err = s.execute(ctx, b.ID, false)
-	return err
+	return nil
 }
 
-func (s *Service) insert(ctx context.Context, trigger string) (api.BlocklistBuild, error) {
+// scopes lists the scopes that need building: the global scope plus every profile that
+// owns at least one enabled source. A profile with no source of its own has no build and
+// is served the global one.
+func (s *Service) scopes(ctx context.Context) []string {
+	rows, _ := s.d.Pool.Query(ctx, `SELECT coalesce(profile_id::text, '') FROM blocklist_sources
+		WHERE enabled GROUP BY profile_id ORDER BY profile_id NULLS FIRST`)
+	profiles, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		s.d.Log.Error("blocklist scopes", "err", err)
+		return []string{""}
+	}
+	return profiles
+}
+
+func (s *Service) insert(ctx context.Context, trigger, profileID string) (api.BlocklistBuild, error) {
 	return scanBuild(s.d.Pool.QueryRow(ctx,
-		"INSERT INTO blocklist_builds (trigger) VALUES ($1) RETURNING "+buildCols, trigger))
+		`WITH ins AS (INSERT INTO blocklist_builds (trigger, profile_id)
+			VALUES ($1, nullif($2, '')::uuid) RETURNING *)
+		 SELECT `+buildCols+` FROM ins b LEFT JOIN config_profiles p ON p.id = b.profile_id`, trigger, profileID))
 }
 
 type result struct {
@@ -152,8 +191,8 @@ type result struct {
 }
 
 // execute runs build and records its outcome on row id. Caller holds s.mu.
-func (s *Service) execute(ctx context.Context, id int64, force bool) (api.BlocklistBuild, error) {
-	res, buildErr := s.build(ctx, force)
+func (s *Service) execute(ctx context.Context, id int64, profileID string, force bool) (api.BlocklistBuild, error) {
+	res, buildErr := s.build(ctx, profileID, force)
 	status, msg := res.status, ""
 	if buildErr != nil {
 		status, msg = "failed", buildErr.Error()
@@ -161,10 +200,11 @@ func (s *Service) execute(ctx context.Context, id int64, force bool) (api.Blockl
 	// A cancelled ctx must still be able to close the row.
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	b, err := scanBuild(s.d.Pool.QueryRow(wctx, `UPDATE blocklist_builds SET finished_at = now(), status = $2,
+	b, err := scanBuild(s.d.Pool.QueryRow(wctx, `WITH upd AS (UPDATE blocklist_builds SET finished_at = now(), status = $2,
 		domains = $3, ips = $4, whitelisted = $5, skipped = $6, size_bytes = $7, sha256 = $8, error = $9,
 		added = $10, removed = $11
-		WHERE id = $1 RETURNING `+buildCols,
+		WHERE id = $1 RETURNING *)
+		SELECT `+buildCols+` FROM upd b LEFT JOIN config_profiles p ON p.id = b.profile_id`,
 		id, status, res.domains, res.ips, res.whitelisted, res.skipped, res.size, res.sha, msg, res.added, res.removed))
 	if err != nil {
 		return b, err
@@ -178,7 +218,7 @@ func (s *Service) execute(ctx context.Context, id int64, force bool) (api.Blockl
 		if err := s.saveChanges(wctx, id, res.changes); err != nil {
 			s.d.Log.Warn("blocklist changes", "id", id, "err", err) // history only; the build stands
 		}
-		if err := os.WriteFile(filepath.Join(s.dir, "inputs.fp"), []byte(res.fingerprint), 0o644); err != nil {
+		if err := os.WriteFile(s.fingerprintPath(profileID), []byte(res.fingerprint), 0o644); err != nil {
 			return b, err
 		}
 		s.prune(wctx)
@@ -187,12 +227,15 @@ func (s *Service) execute(ctx context.Context, id int64, force bool) (api.Blockl
 	return b, buildErr
 }
 
-func (s *Service) build(ctx context.Context, force bool) (res result, err error) {
+func (s *Service) build(ctx context.Context, profileID string, force bool) (res result, err error) {
 	if err := os.MkdirAll(filepath.Join(s.dir, "sources"), 0o755); err != nil {
 		return res, err
 	}
+	// A profile builds from its own sources plus the global ones; anything scoped to a
+	// different profile is invisible here.
 	rows, _ := s.d.Pool.Query(ctx, `SELECT id, kind, url, content, etag, last_modified
-		FROM blocklist_sources WHERE enabled ORDER BY id`)
+		FROM blocklist_sources WHERE enabled AND (`+scopeWhere("profile_id", 1)+
+		` OR profile_id IS NULL) ORDER BY id`, profileID)
 	srcs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[source])
 	if err != nil {
 		return res, err
@@ -228,12 +271,12 @@ func (s *Service) build(ctx context.Context, force bool) (res result, err error)
 		return res, err
 	}
 	res.fingerprint = s.fingerprint(srcs, al.Version)
-	cur, err := Current(ctx, s.d.Pool)
+	cur, err := Current(ctx, s.d.Pool, profileID)
 	if err != nil {
 		return res, err
 	}
 	if cur != nil {
-		old, _ := os.ReadFile(filepath.Join(s.dir, "inputs.fp"))
+		old, _ := os.ReadFile(s.fingerprintPath(profileID))
 		if _, err := os.Stat(s.artifact(cur.SHA256)); err == nil && string(old) == res.fingerprint && !force {
 			res.status = "skipped"
 			return res, nil
@@ -531,10 +574,27 @@ func (s *Service) fingerprint(srcs []source, allowVersion string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// prune keeps the artifacts of the last keepBuilds distinct ok builds.
+// fingerprintPath is where a scope's last built fingerprint is kept; an empty profileID is
+// the global scope. The file lets an unchanged scope skip rebuilding.
+func (s *Service) fingerprintPath(profileID string) string {
+	if profileID == "" {
+		return filepath.Join(s.dir, "inputs.fp")
+	}
+	return filepath.Join(s.dir, "inputs-"+profileID+".fp")
+}
+
+// prune keeps the artifacts still referenced by any scope: the last keepBuilds distinct ok
+// builds per scope, and the newest ok build of every scope (a profile's fallback is the
+// global artifact, which must outlive the global build's own keep window).
 func (s *Service) prune(ctx context.Context) {
-	rows, _ := s.d.Pool.Query(ctx, `SELECT sha256 FROM blocklist_builds WHERE status = 'ok'
-		GROUP BY sha256 ORDER BY max(finished_at) DESC LIMIT $1`, keepBuilds)
+	rows, _ := s.d.Pool.Query(ctx, `
+		(SELECT sha256 FROM (
+			SELECT sha256, row_number() OVER (PARTITION BY profile_id ORDER BY max(finished_at) DESC) AS rn
+			FROM blocklist_builds WHERE status = 'ok' GROUP BY profile_id, sha256
+		) t WHERE rn <= $1)
+		UNION
+		(SELECT DISTINCT ON (profile_id) sha256 FROM blocklist_builds
+			WHERE status = 'ok' ORDER BY profile_id, finished_at DESC)`, keepBuilds)
 	keep, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		s.d.Log.Error("blocklist prune", "err", err)

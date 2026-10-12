@@ -17,6 +17,7 @@ import (
 
 	"github.com/billyriantono/dnsjos/internal/panel/app"
 	"github.com/billyriantono/dnsjos/internal/panel/audit"
+	"github.com/billyriantono/dnsjos/internal/panel/db"
 	"github.com/billyriantono/dnsjos/internal/panel/httpx"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 	keys "github.com/billyriantono/dnsjos/internal/shared/cdb"
@@ -45,6 +46,7 @@ func (s *Service) routes(r *app.Router) {
 	r.Viewer("GET /api/v1/blocklist/builds/{id}/changes", s.listChanges)
 	r.Admin("POST /api/v1/blocklist/builds", s.startBuild)
 	r.Viewer("GET /api/v1/blocklist/current", s.current)
+	r.Viewer("GET /api/v1/blocklist/profiles", s.listProfiles)
 	r.Viewer("GET /api/v1/blocklist/lookup", s.lookup)
 	r.Agent("GET /agent/v1/blocklist", s.serveCDB)
 	r.Viewer("GET /api/v1/allowlist", s.listAllow)
@@ -53,13 +55,14 @@ func (s *Service) routes(r *app.Router) {
 	r.Agent("GET /agent/v1/allowlist", s.serveAllowlist)
 }
 
-const sourceCols = `id, name, kind, url, content, enabled, etag, last_modified, last_fetch_at,
-	last_status, entries, created_at, updated_at`
+const sourceCols = `id, name, kind, url, content, enabled, coalesce(profile_id::text, ''),
+	coalesce((SELECT name FROM config_profiles WHERE id = blocklist_sources.profile_id), ''),
+	etag, last_modified, last_fetch_at, last_status, entries, created_at, updated_at`
 
 func scanSource(row pgx.Row) (api.BlocklistSource, error) {
 	var x api.BlocklistSource
-	err := row.Scan(&x.ID, &x.Name, &x.Kind, &x.URL, &x.Content, &x.Enabled, &x.ETag, &x.LastModified,
-		&x.LastFetchAt, &x.LastStatus, &x.Entries, &x.CreatedAt, &x.UpdatedAt)
+	err := row.Scan(&x.ID, &x.Name, &x.Kind, &x.URL, &x.Content, &x.Enabled, &x.ProfileID, &x.ProfileName,
+		&x.ETag, &x.LastModified, &x.LastFetchAt, &x.LastStatus, &x.Entries, &x.CreatedAt, &x.UpdatedAt)
 	return x, err
 }
 
@@ -72,7 +75,15 @@ func validURL(s string) bool {
 }
 
 func (s *Service) listSources(w http.ResponseWriter, r *http.Request) {
-	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+sourceCols+" FROM blocklist_sources ORDER BY created_at, name")
+	// profile_id= (empty string) selects the global sources; the parameter absent lists every
+	// source. Any other value must be a profile uuid.
+	q := r.URL.Query()
+	where, args := "", []any{}
+	if _, ok := q["profile_id"]; ok {
+		where = " WHERE " + scopeWhere("profile_id", 1)
+		args = append(args, q.Get("profile_id"))
+	}
+	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+sourceCols+" FROM blocklist_sources"+where+" ORDER BY profile_id NULLS FIRST, created_at, name", args...)
 	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.BlocklistSource, error) { return scanSource(row) })
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
@@ -105,15 +116,35 @@ func (s *Service) createSource(w http.ResponseWriter, r *http.Request) {
 		req.URL = ""
 	}
 	enabled := req.Enabled == nil || *req.Enabled
-	src, err := scanSource(s.d.Pool.QueryRow(r.Context(), `INSERT INTO blocklist_sources (name, kind, url, content, enabled)
-		VALUES ($1, $2, $3, $4, $5) RETURNING `+sourceCols, req.Name, req.Kind, req.URL, req.Content, enabled))
+	if err := s.checkProfile(r.Context(), req.ProfileID); err != nil {
+		httpx.BadRequest(w, err.Error())
+		return
+	}
+	src, err := scanSource(s.d.Pool.QueryRow(r.Context(), `INSERT INTO blocklist_sources (name, kind, url, content, enabled, profile_id)
+		VALUES ($1, $2, $3, $4, $5, nullif($6, '')::uuid) RETURNING `+sourceCols, req.Name, req.Kind, req.URL, req.Content, enabled, req.ProfileID))
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
 	_ = audit.Record(r, s.d.Pool, "blocklist.source.create", "blocklist_source", src.ID,
-		map[string]any{"name": src.Name, "kind": src.Kind, "url": src.URL})
+		map[string]any{"name": src.Name, "kind": src.Kind, "url": src.URL, "profile_id": src.ProfileID})
 	httpx.WriteJSON(w, http.StatusCreated, src)
+}
+
+// checkProfile rejects an unknown profile id so a bad client is told rather than the FK
+// failing later.
+func (s *Service) checkProfile(ctx context.Context, profileID string) error {
+	if profileID == "" {
+		return nil
+	}
+	var exists bool
+	if err := s.d.Pool.QueryRow(ctx, "SELECT true FROM config_profiles WHERE id = nullif($1, '')::uuid", profileID).Scan(&exists); err != nil {
+		if db.IsNotFound(err) {
+			return errors.New("profile not found")
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Service) patchSource(w http.ResponseWriter, r *http.Request) {
@@ -139,13 +170,21 @@ func (s *Service) patchSource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// A new URL invalidates the cached validators.
+	if req.ProfileID != nil {
+		if err := s.checkProfile(r.Context(), *req.ProfileID); err != nil {
+			httpx.BadRequest(w, err.Error())
+			return
+		}
+	}
+	// A new URL invalidates the cached validators. A profile change is a scoped move, so the
+	// source is also rebuilt from a clean slate (its fingerprint belongs to the old scope).
 	src, err := scanSource(s.d.Pool.QueryRow(r.Context(), `UPDATE blocklist_sources SET
 		name = coalesce($2, name), content = coalesce($4, content), enabled = coalesce($5, enabled),
-		etag = CASE WHEN $3::text <> url THEN '' ELSE etag END,
-		last_modified = CASE WHEN $3::text <> url THEN '' ELSE last_modified END,
+		profile_id = CASE WHEN $6::text IS NULL THEN profile_id ELSE nullif($6, '')::uuid END,
+		etag = CASE WHEN $3::text <> url OR $6::text IS NOT NULL THEN '' ELSE etag END,
+		last_modified = CASE WHEN $3::text <> url OR $6::text IS NOT NULL THEN '' ELSE last_modified END,
 		url = coalesce($3, url), updated_at = now()
-		WHERE id = $1 RETURNING `+sourceCols, id, req.Name, req.URL, req.Content, req.Enabled))
+		WHERE id = $1 RETURNING `+sourceCols, id, req.Name, req.URL, req.Content, req.Enabled, req.ProfileID))
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
@@ -171,7 +210,16 @@ func (s *Service) listBuilds(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+buildCols+" FROM blocklist_builds ORDER BY id DESC LIMIT $1", limit)
+	// profile_id= (empty string) selects the global builds; the parameter absent lists every
+	// build across scopes.
+	q := r.URL.Query()
+	where, profileID := "", ""
+	if _, ok := q["profile_id"]; ok {
+		profileID = q.Get("profile_id")
+		where = " AND " + scopeWhere("b.profile_id", 2)
+	}
+	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+buildCols+" "+buildFrom+" WHERE true"+where+" ORDER BY b.id DESC LIMIT $1",
+		append([]any{limit}, profileArg(where, profileID)...)...)
 	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.BlocklistBuild, error) { return scanBuild(row) })
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
@@ -181,16 +229,30 @@ func (s *Service) listBuilds(w http.ResponseWriter, r *http.Request) {
 		items = []api.BlocklistBuild{}
 	}
 	var total int
-	if err := s.d.Pool.QueryRow(r.Context(), "SELECT count(*) FROM blocklist_builds").Scan(&total); err != nil {
+	if err := s.d.Pool.QueryRow(r.Context(), "SELECT count(*) FROM blocklist_builds b WHERE true"+where,
+		profileArg(where, profileID)...).Scan(&total); err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, api.List[api.BlocklistBuild]{Items: items, Total: total})
 }
 
+// profileArg returns the profile id argument only when where references it ($2).
+func profileArg(where, profileID string) []any {
+	if where == "" {
+		return nil
+	}
+	return []any{profileID}
+}
+
 func (s *Service) startBuild(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "true"
-	b, err := s.Start("manual", force)
+	profileID := r.URL.Query().Get("profile_id")
+	if err := s.checkProfile(r.Context(), profileID); err != nil {
+		httpx.BadRequest(w, err.Error())
+		return
+	}
+	b, err := s.Start("manual", profileID, force)
 	if errors.Is(err, errBusy) {
 		httpx.WriteError(w, http.StatusConflict, "conflict", err.Error())
 		return
@@ -198,17 +260,64 @@ func (s *Service) startBuild(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
-	_ = audit.Record(r, s.d.Pool, "blocklist.build", "blocklist_build", strconv.FormatInt(b.ID, 10), map[string]bool{"force": force})
+	_ = audit.Record(r, s.d.Pool, "blocklist.build", "blocklist_build", strconv.FormatInt(b.ID, 10),
+		map[string]any{"force": force, "profile_id": b.ProfileID})
 	httpx.WriteJSON(w, http.StatusAccepted, b)
 }
 
 func (s *Service) current(w http.ResponseWriter, r *http.Request) {
-	b, err := Current(r.Context(), s.d.Pool)
+	b, err := Current(r.Context(), s.d.Pool, r.URL.Query().Get("profile_id"))
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, b) // JSON null when there is no build yet
+}
+
+// listProfiles lists every profile with its blocklist scope: how many sources it owns, its
+// newest own build, and the build its nodes actually run (its own, or the global one).
+func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	global, err := Current(ctx, s.d.Pool, "")
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	rows, _ := s.d.Pool.Query(ctx, `
+		SELECT p.id::text, p.name, p.description,
+			(SELECT count(*) FROM blocklist_sources s WHERE s.profile_id = p.id)
+		FROM config_profiles p ORDER BY p.name`)
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.BlocklistProfile, error) {
+		var x api.BlocklistProfile
+		err := row.Scan(&x.ID, &x.Name, &x.Description, &x.SourceCount)
+		return x, err
+	})
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	if items == nil {
+		items = []api.BlocklistProfile{}
+	}
+	for i := range items {
+		b, err := Current(ctx, s.d.Pool, items[i].ID)
+		if err != nil {
+			httpx.WriteDBError(w, r, err)
+			return
+		}
+		if b != nil {
+			items[i].OwnBuild = b
+			items[i].EffectiveBuild = b
+		}
+	}
+	// A profile without a build of its own is served the global one.
+	for i := range items {
+		if items[i].OwnBuild == nil {
+			items[i].UsesGlobal = true
+			items[i].EffectiveBuild = global
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, api.List[api.BlocklistProfile]{Items: items, Total: len(items)})
 }
 
 func (s *Service) lookup(w http.ResponseWriter, r *http.Request) {
@@ -217,7 +326,7 @@ func (s *Service) lookup(w http.ResponseWriter, r *http.Request) {
 		httpx.BadRequest(w, "name is required")
 		return
 	}
-	b, err := Current(r.Context(), s.d.Pool)
+	b, err := Current(r.Context(), s.d.Pool, r.URL.Query().Get("profile_id"))
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
@@ -360,9 +469,43 @@ func lookupCDB(path, q string) (api.BlocklistLookup, error) {
 	}
 }
 
+// nodeProfileID resolves the profile whose blocklist a node should be served: the node's own
+// profile, or the "default" profile when unset. "" means the node has no profile row, so
+// the caller falls back to the global build.
+func (s *Service) nodeProfileID(ctx context.Context, nodeID string) (string, error) {
+	if nodeID == "" {
+		return "", nil
+	}
+	var id *string
+	err := s.d.Pool.QueryRow(ctx, `SELECT p.id::text FROM nodes n
+		JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
+		WHERE n.id = $1`, nodeID).Scan(&id)
+	if db.IsNotFound(err) || (err == nil && id == nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return *id, nil
+}
+
 // serveCDB streams the current CDB; ServeContent handles Range and If-None-Match.
 func (s *Service) serveCDB(w http.ResponseWriter, r *http.Request) {
-	b, err := Current(r.Context(), s.d.Pool)
+	// The agent authenticates as one node; serve the CDB its profile should run, falling
+	// back to the global build (SPEC §7.1). A ?profile_id= override lets an operator (or a
+	// node pinned to another profile) fetch a specific build; empty means global.
+	profileID := r.URL.Query().Get("profile_id")
+	if profileID == "" {
+		var err error
+		if profileID, err = s.nodeProfileID(r.Context(), app.NodeIDFrom(r.Context())); err != nil {
+			httpx.WriteDBError(w, r, err)
+			return
+		}
+	}
+	b, err := Current(r.Context(), s.d.Pool, profileID)
+	if err == nil && b == nil && profileID != "" {
+		b, err = Current(r.Context(), s.d.Pool, "") // fall back to the global build
+	}
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return

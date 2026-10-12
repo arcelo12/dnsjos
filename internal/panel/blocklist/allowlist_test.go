@@ -155,11 +155,11 @@ func testAllowlist(t *testing.T, d *app.Deps, s *Service) {
 
 	// Build integration: the allowlist changed the inputs, so a plain build rebuilds and
 	// drops d.com (and its subdomains) and 5.6.7.8 from the CDB.
-	b, err := s.insert(ctx, "manual")
+	b, err := s.insert(ctx, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, err = s.execute(ctx, b.ID, false); err != nil || b.Status != "ok" {
+	if b, err = s.execute(ctx, b.ID, "", false); err != nil || b.Status != "ok" {
 		t.Fatalf("build %+v %v", b, err)
 	}
 	for _, q := range []string{"d.com", "www.d.com", "5.6.7.8"} {
