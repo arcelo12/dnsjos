@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
 	"testing"
 
@@ -188,5 +189,43 @@ func TestScopes(t *testing.T) {
 	}
 	if !blockedIn(t, s, nb, "global.com") {
 		t.Fatal("B's converged build lost the global sources")
+	}
+}
+
+// Two ok builds in the same scope can share a finished_at timestamp (both are stamped by
+// now(), which is the transaction time). The newest one must win deterministically: Current
+// and the profiles listing order by finished_at then id, and prune keeps that same row, so
+// the artifact Current points at is never the one prune deletes.
+func TestCurrentTieBreakIsByID(t *testing.T) {
+	s, pool := newProfileSvc(t)
+	ctx := context.Background()
+
+	addSource(t, pool, "g", "manual_domains", "g.com", "")
+	first := buildScope(t, s, "")
+	exec(t, pool, "UPDATE blocklist_sources SET content = 'h.com' WHERE kind = 'manual_domains'")
+	second := buildScope(t, s, "")
+	if first.SHA256 == second.SHA256 {
+		t.Fatal("second build did not change the artifact")
+	}
+	// Force the tie the tie-break exists for.
+	exec(t, pool, "UPDATE blocklist_builds SET finished_at = (SELECT finished_at FROM blocklist_builds WHERE id = $1) WHERE id = $2",
+		first.ID, second.ID)
+
+	cur, err := Current(ctx, pool, "")
+	if err != nil || cur == nil {
+		t.Fatal("Current:", err)
+	}
+	if cur.ID != second.ID {
+		t.Fatalf("Current picked build %d, want the higher id %d", cur.ID, second.ID)
+	}
+	// prune must keep the artifact Current serves, not the tied older row.
+	for i := 0; i < keepBuilds; i++ {
+		exec(t, pool, "UPDATE blocklist_sources SET content = $1 WHERE kind = 'manual_domains'",
+			[]string{"i1.com", "i2.com", "i3.com"}[i])
+		buildScope(t, s, "")
+	}
+	cur, _ = Current(ctx, pool, "")
+	if _, err := os.Stat(s.artifact(cur.SHA256)); err != nil {
+		t.Fatalf("prune removed the artifact Current serves: %v", err)
 	}
 }

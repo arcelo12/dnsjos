@@ -97,7 +97,7 @@ func scopeWhere(col string, n int) string {
 // the UI can still tell "this profile has no build of its own" apart from "it uses global".
 func Current(ctx context.Context, q db.Querier, profileID string) (*api.BlocklistBuild, error) {
 	b, err := scanBuild(q.QueryRow(ctx, "SELECT "+buildCols+" "+buildFrom+
-		" WHERE b.status = 'ok' AND "+scopeWhere("b.profile_id", 1)+" ORDER BY b.finished_at DESC LIMIT 1", profileID))
+		" WHERE b.status = 'ok' AND "+scopeWhere("b.profile_id", 1)+" ORDER BY b.finished_at DESC, b.id DESC LIMIT 1", profileID))
 	if db.IsNotFound(err) {
 		return nil, nil
 	}
@@ -594,12 +594,12 @@ func (s *Service) fingerprintPath(profileID string) string {
 func (s *Service) prune(ctx context.Context) {
 	rows, _ := s.d.Pool.Query(ctx, `
 		(SELECT sha256 FROM (
-			SELECT sha256, row_number() OVER (PARTITION BY profile_id ORDER BY max(finished_at) DESC) AS rn
+			SELECT sha256, row_number() OVER (PARTITION BY profile_id ORDER BY max(finished_at) DESC, max(id) DESC) AS rn
 			FROM blocklist_builds WHERE status = 'ok' GROUP BY profile_id, sha256
 		) t WHERE rn <= $1)
 		UNION
 		(SELECT DISTINCT ON (profile_id) sha256 FROM blocklist_builds
-			WHERE status = 'ok' ORDER BY profile_id, finished_at DESC)`, keepBuilds)
+			WHERE status = 'ok' ORDER BY profile_id, finished_at DESC, id DESC)`, keepBuilds)
 	keep, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		s.d.Log.Error("blocklist prune", "err", err)

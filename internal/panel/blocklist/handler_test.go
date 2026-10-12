@@ -170,4 +170,17 @@ func TestPatchManualSourceAndMoveHTTP(t *testing.T) {
 	if src.ProfileID != "" {
 		t.Fatalf("move to global left profile %q", src.ProfileID)
 	}
+	// A non-empty url on a manual source is ignored, never stored.
+	call("PATCH", "/api/v1/blocklist/sources/"+id, `{"url":"https://example.com/list.txt"}`, 200, &src)
+	if src.URL != "" || src.Content != "m2.com" {
+		t.Fatalf("manual source took a url: %+v", src)
+	}
+	// A malformed url on a URL source is still rejected.
+	uid := addSource(t, pool, "u", "url_domains", "", "")
+	exec(t, pool, `UPDATE blocklist_sources SET url = 'https://example.com/d.txt' WHERE id = $1`, uid)
+	call("PATCH", "/api/v1/blocklist/sources/"+uid, `{"url":"ftp://nope"}`, 400, nil)
+	call("PATCH", "/api/v1/blocklist/sources/"+uid, `{"url":"https://example.com/other.txt"}`, 200, &src)
+	if src.URL != "https://example.com/other.txt" {
+		t.Fatalf("url source kept %q", src.URL)
+	}
 }

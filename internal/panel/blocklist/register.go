@@ -328,7 +328,7 @@ func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
 // profile id. It is the one-shot form of Current for the profiles listing.
 func collectScopedCurrent(ctx context.Context, q db.Querier) (map[string]*api.BlocklistBuild, error) {
 	rows, _ := q.Query(ctx, "SELECT DISTINCT ON (b.profile_id) "+buildCols+" "+buildFrom+
-		" WHERE b.status = 'ok' AND b.profile_id IS NOT NULL ORDER BY b.profile_id, b.finished_at DESC")
+		" WHERE b.status = 'ok' AND b.profile_id IS NOT NULL ORDER BY b.profile_id, b.finished_at DESC, b.id DESC")
 	builds, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.BlocklistBuild, error) { return scanBuild(row) })
 	if err != nil {
 		return nil, err
