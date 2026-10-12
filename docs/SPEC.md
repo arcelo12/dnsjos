@@ -551,6 +551,9 @@ shared by every profile, a non-null `profile_id` scopes the source to that one c
 profile. A profile therefore blocks the union of the global and its own sources; a source
 can be moved between scopes with `PATCH /blocklist/sources/{id}`. The blocklist page
 exposes a profile selector so an operator creates and manages per-profile blocklists.
+Deleting a config profile **cascades**: its sources and its build history go with it, and
+its nodes fall back to the global build until a global build exists (the UI warns before
+the delete).
 
 Fetch with a browser User-Agent, `If-None-Match` / `If-Modified-Since`, 120 s timeout,
 streaming (never hold the 220 MB body in memory as a string).
@@ -571,7 +574,10 @@ same fields (`bytes`, `seconds`, `mb_per_s`, `streams`) are logged.
 ### 7.2 Build
 
 * Schedule: every 3 h (setting), plus "Build now" button. Each scope (global, and every
-  profile that owns an enabled source) builds on its own clock and into its own CDB.
+  profile that owns an enabled source or still has an `ok` build) builds on its own clock
+  and into its own CDB. Keeping a profile with an `ok` build in the scope list is what lets
+  a profile whose last source was deleted converge to the global set instead of pinning a
+  stale artifact.
 * A scope builds from its own sources **plus** the global ones; sources scoped to another
   profile are never included. The fingerprint is kept per scope, so an unchanged scope is
   skipped even when another scope rebuilt.

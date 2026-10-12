@@ -89,7 +89,7 @@ func scanBuild(row pgx.Row) (api.BlocklistBuild, error) {
 //
 // scopeWhere builds a "profile_id IS NULL" / "profile_id = $n" predicate on a column.
 func scopeWhere(col string, n int) string {
-	return fmt.Sprintf("(%s IS NULL AND $%d = '') OR %s = nullif($%d, '')::uuid", col, n, col, n)
+	return fmt.Sprintf("((%s IS NULL AND $%d = '') OR %s = nullif($%d, '')::uuid)", col, n, col, n)
 }
 
 // Current returns the newest ok build for one scope, or nil when there is none. An empty
@@ -158,12 +158,17 @@ func (s *Service) tick(ctx context.Context) error {
 	return nil
 }
 
-// scopes lists the scopes that need building: the global scope plus every profile that
-// owns at least one enabled source. A profile with no source of its own has no build and
-// is served the global one.
+// scopes lists the scopes that need building: the global scope, every profile that owns at
+// least one enabled source, and every profile that still has an ok build. The last group is
+// what lets a profile whose sources were all deleted or moved converge: it keeps getting
+// rebuilt (from the global sources alone) instead of pinning a stale artifact forever.
 func (s *Service) scopes(ctx context.Context) []string {
-	rows, _ := s.d.Pool.Query(ctx, `SELECT coalesce(profile_id::text, '') FROM blocklist_sources
-		WHERE enabled GROUP BY profile_id ORDER BY profile_id NULLS FIRST`)
+	rows, _ := s.d.Pool.Query(ctx, `
+		SELECT coalesce(profile_id::text, '') FROM (
+			SELECT profile_id FROM blocklist_sources WHERE enabled
+			UNION
+			SELECT profile_id FROM blocklist_builds WHERE status = 'ok'
+		) u GROUP BY profile_id ORDER BY profile_id NULLS FIRST`)
 	profiles, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		s.d.Log.Error("blocklist scopes", "err", err)

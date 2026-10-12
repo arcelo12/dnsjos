@@ -84,7 +84,7 @@ function useBuildState(profileId?: string) {
   const newest = builds.data?.items[0]
   const newestKey = newest && `${newest.id}:${newest.status}`
   useEffect(() => {
-    if (newestKey) void qc.invalidateQueries({ queryKey: ['blocklist', 'sources'] })
+    if (newestKey) void qc.invalidateQueries({ queryKey: qk.blocklistSourcesAll })
   }, [qc, newestKey])
   return { builds, current, running }
 }
@@ -417,7 +417,9 @@ function CurrentBuildCard({
           Current build
           {build && <StatusBadge status={build.status} />}
           {(build?.profile_id || running) && (
-            <Badge variant="outline">{build?.profile_id ? build.profile_name || build.profile_id : 'all scopes'}</Badge>
+            <Badge variant="outline">
+              {build?.profile_id ? build.profile_name || build.profile_id : scope === '' ? 'global' : scopeLabel}
+            </Badge>
           )}
           {running && <StatusBadge status="running" label="new build running" />}
         </CardTitle>

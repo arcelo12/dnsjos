@@ -100,7 +100,7 @@ export default function ProfilesPage() {
               description={
                 (nodesOf(p)?.length ?? p.nodes) > 0
                   ? `${nodesOf(p)?.length ?? p.nodes} node(s) still use it, so the panel will refuse. Move them to another profile first.`
-                  : 'All its versions are deleted too. This cannot be undone.'
+                  : 'All its versions are deleted too, and so are its blocklist sources and build history. This cannot be undone.'
               }
               confirmLabel="Delete"
               destructive

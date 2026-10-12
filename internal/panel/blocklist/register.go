@@ -163,9 +163,13 @@ func (s *Service) patchSource(w http.ResponseWriter, r *http.Request) {
 		httpx.BadRequest(w, "name must not be empty")
 		return
 	}
+	// url is meaningless on a manual source: the dialog submits the full shape (url:""), so
+	// ignore it rather than rejecting the request, mirroring createSource.
 	if req.URL != nil {
 		*req.URL = strings.TrimSpace(*req.URL)
-		if !isURLKind(kind) || !validURL(*req.URL) {
+		if !isURLKind(kind) {
+			req.URL = nil
+		} else if !validURL(*req.URL) {
 			httpx.BadRequest(w, "url must be an http(s) URL on a URL source")
 			return
 		}
@@ -213,13 +217,14 @@ func (s *Service) listBuilds(w http.ResponseWriter, r *http.Request) {
 	// profile_id= (empty string) selects the global builds; the parameter absent lists every
 	// build across scopes.
 	q := r.URL.Query()
-	where, profileID := "", ""
+	itemsWhere, countWhere, profileID := "", "", ""
 	if _, ok := q["profile_id"]; ok {
 		profileID = q.Get("profile_id")
-		where = " AND " + scopeWhere("b.profile_id", 2)
+		itemsWhere = " AND " + scopeWhere("b.profile_id", 2)
+		countWhere = " AND " + scopeWhere("b.profile_id", 1)
 	}
-	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+buildCols+" "+buildFrom+" WHERE true"+where+" ORDER BY b.id DESC LIMIT $1",
-		append([]any{limit}, profileArg(where, profileID)...)...)
+	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+buildCols+" "+buildFrom+" WHERE true"+itemsWhere+" ORDER BY b.id DESC LIMIT $1",
+		append([]any{limit}, profileArg(itemsWhere, profileID)...)...)
 	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.BlocklistBuild, error) { return scanBuild(row) })
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
@@ -229,15 +234,15 @@ func (s *Service) listBuilds(w http.ResponseWriter, r *http.Request) {
 		items = []api.BlocklistBuild{}
 	}
 	var total int
-	if err := s.d.Pool.QueryRow(r.Context(), "SELECT count(*) FROM blocklist_builds b WHERE true"+where,
-		profileArg(where, profileID)...).Scan(&total); err != nil {
+	if err := s.d.Pool.QueryRow(r.Context(), "SELECT count(*) FROM blocklist_builds b WHERE true"+countWhere,
+		profileArg(countWhere, profileID)...).Scan(&total); err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, api.List[api.BlocklistBuild]{Items: items, Total: total})
 }
 
-// profileArg returns the profile id argument only when where references it ($2).
+// profileArg returns the profile id argument only when where references it ($1).
 func profileArg(where, profileID string) []any {
 	if where == "" {
 		return nil
@@ -299,25 +304,40 @@ func (s *Service) listProfiles(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []api.BlocklistProfile{}
 	}
+	// One query for every profile's own newest ok build, keyed by profile id, so the page
+	// load stays O(1) queries regardless of how many profiles exist.
+	own, err := collectScopedCurrent(ctx, s.d.Pool)
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
 	for i := range items {
-		b, err := Current(ctx, s.d.Pool, items[i].ID)
-		if err != nil {
-			httpx.WriteDBError(w, r, err)
-			return
-		}
-		if b != nil {
+		if b, ok := own[items[i].ID]; ok {
 			items[i].OwnBuild = b
 			items[i].EffectiveBuild = b
+			continue
 		}
-	}
-	// A profile without a build of its own is served the global one.
-	for i := range items {
-		if items[i].OwnBuild == nil {
-			items[i].UsesGlobal = true
-			items[i].EffectiveBuild = global
-		}
+		// A profile without a build of its own is served the global one.
+		items[i].UsesGlobal = true
+		items[i].EffectiveBuild = global
 	}
 	httpx.WriteJSON(w, http.StatusOK, api.List[api.BlocklistProfile]{Items: items, Total: len(items)})
+}
+
+// collectScopedCurrent returns the newest ok build of every non-global scope, keyed by
+// profile id. It is the one-shot form of Current for the profiles listing.
+func collectScopedCurrent(ctx context.Context, q db.Querier) (map[string]*api.BlocklistBuild, error) {
+	rows, _ := q.Query(ctx, "SELECT DISTINCT ON (b.profile_id) "+buildCols+" "+buildFrom+
+		" WHERE b.status = 'ok' AND b.profile_id IS NOT NULL ORDER BY b.profile_id, b.finished_at DESC")
+	builds, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.BlocklistBuild, error) { return scanBuild(row) })
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*api.BlocklistBuild, len(builds))
+	for i := range builds {
+		out[builds[i].ProfileID] = &builds[i]
+	}
+	return out, nil
 }
 
 func (s *Service) lookup(w http.ResponseWriter, r *http.Request) {

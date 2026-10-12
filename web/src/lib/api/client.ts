@@ -278,6 +278,11 @@ export const qk = {
   blocklistBuilds: (profileId?: string) => ['blocklist', 'builds', profileId ?? null] as const,
   blocklistCurrent: (profileId?: string) => ['blocklist', 'current', profileId ?? null] as const,
   blocklistProfiles: ['blocklist', 'profiles'] as const,
+  // Family keys: a prefix that matches every scope's query (the per-query keys above end in
+  // a profile id, so the bare ["blocklist","sources"] is the correct prefix for "all").
+  blocklistSourcesAll: ['blocklist', 'sources'] as const,
+  blocklistBuildsAll: ['blocklist', 'builds'] as const,
+  blocklistCurrentAll: ['blocklist', 'current'] as const,
   blocklistLookup: (name: string) => ['blocklist', 'lookup', name] as const,
   blocklistChanges: (id: number, q: BlocklistChangesQuery) => ['blocklist', 'changes', id, q] as const,
   allowlist: ['allowlist'] as const,
@@ -448,18 +453,18 @@ export const usePublishVersion = () =>
     () => [qk.profiles, qk.nodes, qk.upgrades],
   )
 
-export const useCreateSource = () => useMut(api.blocklist.createSource, () => [['blocklist', 'sources']])
+export const useCreateSource = () => useMut(api.blocklist.createSource, () => [qk.blocklistSourcesAll, qk.blocklistProfiles])
 export const useUpdateSource = () =>
   useMut(
     (a: { id: string; patch: BlocklistSourcePatch }) => api.blocklist.updateSource(a.id, a.patch),
-    () => [['blocklist', 'sources']],
+    () => [qk.blocklistSourcesAll, qk.blocklistProfiles, qk.blocklistCurrentAll, qk.blocklistBuildsAll],
   )
-export const useDeleteSource = () => useMut(api.blocklist.removeSource, () => [['blocklist', 'sources']])
+export const useDeleteSource = () => useMut(api.blocklist.removeSource, () => [qk.blocklistSourcesAll, qk.blocklistProfiles])
 export const useBuildNow = () =>
   useMut((a: { force?: boolean; profileId?: string }) => api.blocklist.build(a.force ?? false, a.profileId), () => [
-    ['blocklist', 'builds'],
-    ['blocklist', 'current'],
-    ['blocklist', 'sources'],
+    qk.blocklistBuildsAll,
+    qk.blocklistCurrentAll,
+    qk.blocklistSourcesAll,
     qk.blocklistProfiles,
     qk.overview,
   ])

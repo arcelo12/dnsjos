@@ -145,8 +145,9 @@ func TestProfileCurrent(t *testing.T) {
 	}
 }
 
-// scopes is exactly the profiles that own an enabled source (the global build is a scope
-// of its own and is only listed while an enabled global source exists).
+// scopes is the profiles that own an enabled source plus any profile that still has an ok
+// build (so a profile whose sources were removed keeps converging). The global build is a
+// scope of its own and is only listed while an enabled global source or an ok build exists.
 func TestScopes(t *testing.T) {
 	s, pool := newProfileSvc(t)
 	a, b := newProfile(t, pool, "A"), newProfile(t, pool, "B")
@@ -160,11 +161,32 @@ func TestScopes(t *testing.T) {
 	addSource(t, pool, "g", "manual_domains", "global.com", "")  // global scope
 	addSource(t, pool, "a", "manual_domains", "a.com", a)        // A
 	addSource(t, pool, "a2", "manual_domains", "a2.com", a)      // A, second source
-	addSource(t, pool, "b", "manual_domains", "b.com", b)        // B
-	exec(t, pool, "UPDATE blocklist_sources SET enabled = false WHERE name = 'b'") // B owns nothing enabled
+	bid := addSource(t, pool, "b", "manual_domains", "b.com", b) // B, its only enabled source
 
-	want := []string{"", a} // sorted NULLS FIRST: global, then A
+	want := []string{"", a, b} // sorted NULLS FIRST: global, then A, then B
+	slices.Sort(want[1:])
 	if got := s.scopes(ctx); !slices.Equal(got, want) {
 		t.Fatalf("scopes = %v, want %v", got, want)
+	}
+
+	// B builds with b.com, then loses its only source. The ok build keeps B in the scope
+	// list so it still converges: the next build is global-only and drops b.com.
+	buildScope(t, s, "")
+	bb := buildScope(t, s, b)
+	if !blockedIn(t, s, bb, "b.com") {
+		t.Fatal("B's own build is missing b.com")
+	}
+	exec(t, pool, "UPDATE blocklist_sources SET enabled = false WHERE id = $1", bid)
+	wantAfter := []string{"", a, b}
+	slices.Sort(wantAfter[1:])
+	if got := s.scopes(ctx); !slices.Equal(got, wantAfter) {
+		t.Fatalf("scopes after B lost its sources = %v, want %v", got, wantAfter)
+	}
+	nb := buildScope(t, s, b)
+	if blockedIn(t, s, nb, "b.com") {
+		t.Fatal("B still serves its removed source after converging")
+	}
+	if !blockedIn(t, s, nb, "global.com") {
+		t.Fatal("B's converged build lost the global sources")
 	}
 }
