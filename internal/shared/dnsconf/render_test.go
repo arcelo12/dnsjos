@@ -38,6 +38,15 @@ func TestGolden(t *testing.T) {
 			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
 			s.SpeedCheck.FastestIP, s.SpeedCheck.MaxReplyIPNum = true, 4
 		},
+		"ip_alias": func(s *api.ConfigSpec) {
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.IPAlias = api.IPAlias{Enabled: true, Rules: []api.IPAliasRule{
+				{Name: "cf", MatchPools: []string{"104.16.0.0/13", "172.64.0.0/13"},
+					Targets: []string{"172.64.52.159", "172.64.87.224"}, Exclude: []string{"cftunnel.com"}},
+				{Name: "cf6", MatchPools: []string{"2606:4700::/32"},
+					Targets: []string{"2606:4700:3030::6810:3459"}},
+			}}
+		},
 		"response_ips": func(s *api.ConfigSpec) { // opt-in (off by default)
 			s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false
 			s.Blocking.BlockResponseIPs = true
@@ -116,6 +125,27 @@ func TestGolden(t *testing.T) {
 				t.Errorf("%s differs from golden (run with -update)\n%s", name, got.String())
 			}
 		})
+	}
+}
+
+func TestIPAliasLargePacketUsesSlices(t *testing.T) {
+	spec := api.DefaultConfigSpec()
+	spec.Blocking.Enabled, spec.Abuse.Enabled, spec.CGK.Enabled, spec.Analytics.Enabled = false, false, false, false
+	spec.IPAlias = api.IPAlias{Enabled: true, Rules: []api.IPAliasRule{{
+		Name: "cf", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"172.64.52.159"},
+	}}}
+	files, err := Render(spec, testRT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lua := string(files[FileIPAlias])
+	if strings.Contains(lua, "local bytes = { p:byte(1, #p) }") {
+		t.Fatal("ip-alias still expands the entire packet with string.byte")
+	}
+	for _, want := range []string{"p:sub(last, rd - 1)", "p:sub(last)", "local out, last, nt"} {
+		if !strings.Contains(lua, want) {
+			t.Fatalf("ip-alias large-packet splice missing %q", want)
+		}
 	}
 }
 

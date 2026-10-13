@@ -27,7 +27,7 @@ import (
 // can produce (TestManagedCoversRender). The CGK, dual-stack and fastest-IP txt files
 // belong to their loops and are never touched here.
 var Managed = []string{dnsconf.FileConf, dnsconf.FileBlocking, dnsconf.FileAbuse, dnsconf.FileCGK,
-	dnsconf.FileDualStack, dnsconf.FileFastestIP}
+	dnsconf.FileDualStack, dnsconf.FileFastestIP, dnsconf.FileIPAlias}
 
 const (
 	StagingName = ".dnsjos-staging"

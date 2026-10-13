@@ -764,3 +764,174 @@ addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), OrRule({QTypeRule(DNSQTy
 `)
 	return []byte(s.String())
 }
+
+// renderIPAlias pins A/AAAA answers that mention an address inside a CDN's published range
+// to an operator-chosen target IP (smartdist's ip-rules ip-set aliasing). It mirrors CGK:
+// CGK measures to pick an edge, IPAlias forces one. Each rule compiles to a list of
+// ComboAddress prefixes, so a match is a ca:match(cidr) call; matching addresses are
+// overwritten in place, leaving the rest of the answer (TTLs, other record types) intact.
+func renderIPAlias(ia api.IPAlias, _ api.NodeRuntime) []byte {
+	var s strings.Builder
+	s.WriteString(Header)
+	if !ia.Enabled || len(ia.Rules) == 0 {
+		s.WriteString("-- ip-alias disabled or without rules\n")
+		return []byte(s.String())
+	}
+	s.WriteString(`-- IP-alias, smartdist's ip-rules ip-set aliasing. An answer of a name whose A/AAAA
+-- address falls inside a rule's match_pools has every such address rewritten to the rule's
+-- targets, cycling through them. Names in a rule's exclude list (and their subdomains) keep
+-- their real addresses.
+declareMetric("ip-alias-rewrites", "counter", "A/AAAA answers pinned to a configured edge IP")
+`)
+	s.WriteString(skipNameLua)
+	s.WriteString(`
+local function at16(p, i) return p:byte(i) * 256 + p:byte(i + 1) end
+
+-- fmtAddr renders the rdlen-byte address at 1-based offset rd as a string for newCA.
+local function fmtAddr(p, rd, rdlen)
+  if rdlen == 4 then return string.format("%d.%d.%d.%d", p:byte(rd), p:byte(rd + 1), p:byte(rd + 2), p:byte(rd + 3)) end
+  local g = {}
+  for i = 0, 7 do g[#g + 1] = string.format("%x", at16(p, rd + i * 2)) end
+  return table.concat(g, ":")
+end
+
+-- ownerName decodes the (possibly compressed) wire name at pos into a dotted text
+-- name: newDNSName does not take wire bytes, so excluded owners are rebuilt as text.
+local function ownerName(p, pos)
+  local out, jumps = {}, 0
+  while true do
+    local l = p:byte(pos)
+    if not l then return nil end
+    if l >= 192 then
+      local lo = p:byte(pos + 1)
+      jumps = jumps + 1
+      if not lo or jumps > 16 then return nil end
+      pos = (l - 192) * 256 + lo + 1
+    elseif l >= 64 then
+      return nil
+    elseif l == 0 then
+      return table.concat(out, ".")
+    else
+      local lbl = p:sub(pos + 1, pos + l)
+      if #lbl ~= l then return nil end
+      out[#out + 1] = lbl
+      pos = pos + l + 1
+    end
+  end
+end
+
+-- ipToBytes turns an address string into its 4 (IPv4) or 16 (IPv6) wire bytes.
+local function ip4ToBytes(s)
+  local a, b, c, d = s:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  if not a then return nil end
+  return string.char(tonumber(a), tonumber(b), tonumber(c), tonumber(d))
+end
+`)
+	s.WriteString(parse6Lua)
+	s.WriteString(`
+local function ipToBytes(s)
+  if s:find(":", 1, true) then return parse6(s) end
+  return ip4ToBytes(s)
+end
+`)
+	// One hook per rule keeps each rule's round-robin cursor independent.
+	for i, r := range ia.Rules {
+		s.WriteString(renderIPAliasRule(i, r))
+	}
+	// Rewritten responses skip the packet cache, so the target rotation is not frozen
+	// by the first cached answer.
+	s.WriteString(`addResponseAction(TagRule("dnsjos-ipa", "rewritten"), SetSkipCacheResponseAction(), {name = "dnsjos-ip-alias-nocache"})
+`)
+	return []byte(s.String())
+}
+
+// renderIPAliasRule emits the pools, targets and the response hook for one rule.
+func renderIPAliasRule(idx int, r api.IPAliasRule) string {
+	fam, rdlen := "A", 4
+	if len(r.Targets) > 0 {
+		if a, err := netip.ParseAddr(r.Targets[0]); err == nil && a.Is6() && !a.Is4In6() {
+			fam, rdlen = "AAAA", 16
+		}
+	}
+	var s strings.Builder
+	fmt.Fprintf(&s, "\nlocal ipa%d = { name = %s, qtype = DNSQType.%s, rdlen = %d, rr = 0, excluded = false,\n  pools = newNMG(), targets = {}, exclude = newSuffixMatchNode() }\n",
+		idx, luaString(r.Name), fam, rdlen)
+	fmt.Fprintf(&s, "for _, m in ipairs(%s) do ipa%d.pools:addMask(m) end\n",
+		luaStrSlice(r.MatchPools), idx)
+	fmt.Fprintf(&s, "for _, t in ipairs(%s) do local b = ipToBytes(t) if b and #b == %d then ipa%d.targets[#ipa%d.targets + 1] = b end end\n",
+		luaStrSlice(r.Targets), rdlen, idx, idx)
+	fmt.Fprintf(&s, "for _, e in ipairs(%s) do ipa%d.exclude:add(newDNSName(e)) ipa%d.excluded = true end\n",
+		luaStrSlice(r.Exclude), idx, idx)
+	fmt.Fprintf(&s, `if #ipa%d.targets > 0 and ipa%d.pools:size() > 0 then
+  addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), QTypeRule(ipa%d.qtype)}),
+                    LuaResponseAction(function(dr)
+    if ipa%d.excluded and ipa%d.exclude:check(dr.qname) then return DNSResponseAction.None, "" end
+    local p = dr:getContent()
+    if #p < 12 or at16(p, 5) ~= 1 or p:byte(3) %% 4 >= 2 then return DNSResponseAction.None, "" end -- 1 question, not TC
+    local pos = skipName(p, 13)
+    if not pos or pos + 3 > #p then return DNSResponseAction.None, "" end
+    pos = pos + 4 -- first byte after the question
+    -- Pass 1: is any answer address inside one of the rule's pools? A matching record
+    -- whose own owner name is excluded (a CNAME can chain into one) is left alone.
+    local hits, scan = {}, pos
+    for _ = 1, at16(p, 7) do
+      local rr = scan
+      scan = skipName(p, scan)
+      if not scan or scan + 9 > #p then return DNSResponseAction.None, "" end
+      local t, rl = at16(p, scan), at16(p, scan + 8)
+      local rd = scan + 10
+      if rd + rl - 1 > #p then return DNSResponseAction.None, "" end
+      if t == ipa%d.qtype and rl == ipa%d.rdlen and ipa%d.pools:match(newCA(fmtAddr(p, rd, ipa%d.rdlen))) then
+        local excluded = false
+        if ipa%d.excluded then
+          local n = ownerName(p, rr)
+          if not n then
+            excluded = true
+          else
+            local ok, dn = pcall(newDNSName, n)
+            excluded = not (ok and dn) or ipa%d.exclude:check(dn)
+          end
+        end
+        if not excluded then hits[#hits + 1] = rd end
+      end
+      scan = rd + rl
+    end
+    if #hits == 0 then return DNSResponseAction.None, "" end
+    -- Pass 2: rebuild from slices instead of expanding p:byte(1, #p). LuaJIT limits the
+    -- number of return values from one call, so byte-expanding large TCP/DoH answers
+    -- fails above roughly 8 KB. Hits are discovered in wire order, so slices stay ordered.
+    local out, last, nt = {}, 1, #ipa%d.targets
+    for _, rd in ipairs(hits) do
+      out[#out + 1] = p:sub(last, rd - 1)
+      local tb = ipa%d.targets[(ipa%d.rr %% nt) + 1]
+      ipa%d.rr = ipa%d.rr + 1
+      out[#out + 1] = tb
+      last = rd + ipa%d.rdlen
+    end
+    out[#out + 1] = p:sub(last)
+    dr:setContent(table.concat(out))
+    -- The rewritten answer must not be packet-cached, or the cache would freeze the
+    -- first rotation step; the TagRule + SetSkipCacheResponseAction below reads this tag.
+    dr:setTag("dnsjos-ipa", "rewritten")
+    incMetric("ip-alias-rewrites")
+    return DNSResponseAction.None, ""
+  end), {name = "dnsjos-ip-alias: " .. ipa%d.name})
+end
+`,
+		idx, idx, idx, idx, idx, idx,
+		idx, idx, idx, idx, idx, idx,
+		idx, idx, idx, idx, idx, idx)
+	return s.String()
+}
+
+// luaStrSlice renders a []string as a Lua array literal ("{}" when empty).
+func luaStrSlice(items []string) string {
+	if len(items) == 0 {
+		return "{}"
+	}
+	parts := make([]string, len(items))
+	for i, s := range items {
+		parts[i] = luaString(s)
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}

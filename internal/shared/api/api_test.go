@@ -12,6 +12,24 @@ func TestDefaultsValidate(t *testing.T) {
 	}
 }
 
+// TestIPAliasValid checks a well-formed ip-alias spec (IPv4 and IPv6 rules) validates.
+func TestIPAliasValid(t *testing.T) {
+	s := DefaultConfigSpec()
+	s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{
+		{Name: "cf", MatchPools: []string{"104.16.0.0/13", "172.64.0.0/13"},
+			Targets: []string{"172.64.52.159", "172.64.87.224"}, Exclude: []string{"cftunnel.com"}},
+		{Name: "cf6", MatchPools: []string{"2606:4700::/32"},
+			Targets: []string{"2606:4700:3030::1", "2606:4700:3030::2"}},
+		// Dotted-tail pools are accepted: dnsdist's NetmaskGroup matches them against
+		// the hex wire form (CIDR and bare alike). Targets must stay plain, though.
+		{Name: "nat64", MatchPools: []string{"64:ff9b::1.2.3.0/120", "64:ff9b::5.6.7.8"},
+			Targets: []string{"64:ff9b::909:909"}},
+	}}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*ConfigSpec){
 		"acl":              func(s *ConfigSpec) { s.ACL = []string{"10.0.0.0/33"} },
@@ -41,9 +59,54 @@ func TestValidateRejects(t *testing.T) {
 		"upstream name":    func(s *ConfigSpec) { s.Upstreams.Servers[0].Name = `a"b` },
 		"webserver listen": func(s *ConfigSpec) { s.Webserver.Listen = "localhost:8083" },
 		"exclude hostname": func(s *ConfigSpec) { s.CGK.Exclude = []string{"bad domain"} },
-		"sample_rate":      func(s *ConfigSpec) { s.Analytics.SampleRate = 1001 },
-		"top_k":            func(s *ConfigSpec) { s.Analytics.TopK = 99 },
-		"stream_addr":      func(s *ConfigSpec) { s.Analytics.StreamAddr = "localhost:6001" },
+		"ip_alias no name": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"1.2.3.4"}}}}
+		},
+		"ip_alias no pools": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", Targets: []string{"1.2.3.4"}}}}
+		},
+		"ip_alias bad pool": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"104.16.0.0/40"}, Targets: []string{"1.2.3.4"}}}}
+		},
+		"ip_alias no targets": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"104.16.0.0/13"}}}}
+		},
+		"ip_alias bad target": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"nope"}}}}
+		},
+		"ip_alias mixed families": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"1.2.3.4", "2001:db8::1"}}}}
+		},
+		"ip_alias bad exclude": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"1.2.3.4"}, Exclude: []string{"bad domain"}}}}
+		},
+		"ip_alias zoned target": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf6", MatchPools: []string{"2606:4700::/32"}, Targets: []string{"fe80::1%eth0"}}}}
+		},
+		"ip_alias mapped target": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"::ffff:1.2.3.4"}}}}
+		},
+		"ip_alias mapped hex target": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"::ffff:102:304"}}}}
+		},
+		"ip_alias dotted target": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf6", MatchPools: []string{"2606:4700::/32"}, Targets: []string{"64:ff9b::1.2.3.4"}}}}
+		},
+		"ip_alias mapped pool": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"::ffff:104.16.0.0/120"}, Targets: []string{"172.64.52.159"}}}}
+		},
+		"ip_alias zoned pool": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf6", MatchPools: []string{"fe80::1%eth0"}, Targets: []string{"2606:4700:3030::1"}}}}
+		},
+		"ip_alias v6 pool v4 target": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf", MatchPools: []string{"2606:4700::/32"}, Targets: []string{"172.64.52.159"}}}}
+		},
+		"ip_alias v4 pool v6 target": func(s *ConfigSpec) {
+			s.IPAlias = IPAlias{Enabled: true, Rules: []IPAliasRule{{Name: "cf6", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"2606:4700:3030::1"}}}}
+		},
+		"sample_rate": func(s *ConfigSpec) { s.Analytics.SampleRate = 1001 },
+		"top_k":       func(s *ConfigSpec) { s.Analytics.TopK = 99 },
+		"stream_addr": func(s *ConfigSpec) { s.Analytics.StreamAddr = "localhost:6001" },
 	}
 	for name, mutate := range cases {
 		s := DefaultConfigSpec()

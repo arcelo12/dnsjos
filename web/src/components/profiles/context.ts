@@ -31,6 +31,7 @@ export const TABS = [
   { id: 'cgk', label: 'CGK', keys: ['cgk'] },
   { id: 'speed_check', label: 'Speed check', keys: ['speed_check'] },
   { id: 'dualstack', label: 'Dual-stack', keys: ['dualstack'] },
+  { id: 'ip_alias', label: 'IP-alias', keys: ['ip_alias'] },
   { id: 'dnssec', label: 'DNSSEC', keys: ['dnssec'] },
   { id: 'analytics', label: 'Analytics', keys: ['analytics'] },
   { id: 'tuning', label: 'Tuning', keys: ['tuning', 'webserver'] },

@@ -20,6 +20,7 @@ type ConfigSpec struct {
 	CGK        CGK        `json:"cgk"`
 	SpeedCheck SpeedCheck `json:"speed_check"`
 	DualStack  DualStack  `json:"dualstack"`
+	IPAlias    IPAlias    `json:"ip_alias"`
 	DNSSEC     DNSSEC     `json:"dnssec"`
 	Tuning     Tuning     `json:"tuning"`
 	Webserver  Webserver  `json:"webserver"`
@@ -139,6 +140,33 @@ type DualStack struct {
 	// Also drop A answers when IPv6 is faster (dualstack-ip-allow-force-AAAA).
 	AllowForceAAAA bool `json:"allow_force_aaaa"`
 	// Names (and their subdomains) never touched (domain-rules -dualstack-ip-selection no).
+	Exclude []string `json:"exclude"`
+}
+
+// IPAlias rewrites the addresses of A/AAAA answers that fall inside a CDN's published IP
+// range to a preferred target IP (smartdist's ip-rules ip-set aliasing). It is the mirror
+// image of CGK: CGK picks an edge IP by measuring, IPAlias pins an explicit one — useful
+// when an operator must force a specific anycast edge (a PoP that peers better, a DDoS
+// scrubbing centre) regardless of which address the upstream returned.
+type IPAlias struct {
+	Enabled bool          `json:"enabled"`
+	Rules   []IPAliasRule `json:"rules"`
+}
+
+// IPAliasRule rewrites matching answers of the names it does not exclude. Targets are used
+// round-robin when there is more than one, like smartdns' multiple alias targets.
+type IPAliasRule struct {
+	// Name identifies the rule (metrics, logs); it is not a DNS name.
+	Name string `json:"name"`
+	// MatchPools are CIDR ranges; an answer is rewritten when any of its A/AAAA addresses
+	// is inside one of them (the CDN's space, e.g. Cloudflare's 104.16.0.0/13).
+	MatchPools []string `json:"match_pools"`
+	// Targets are the preferred addresses written into the answer, used round-robin. All
+	// must be one family, and targets[0] decides which one the rule covers (IPv4 = A,
+	// IPv6 = AAAA).
+	Targets []string `json:"targets"`
+	// Exclude lists names (and their subdomains) never rewritten by this rule
+	// (smartdns' exclude_domain_set), e.g. tunnel endpoints that must keep their real IP.
 	Exclude []string `json:"exclude"`
 }
 
@@ -291,6 +319,7 @@ func DefaultConfigSpec() ConfigSpec {
 		},
 		SpeedCheck: SpeedCheck{Mode: DefaultSpeedCheckMode, MaxReplyIPNum: 8, Exclude: []string{}}, // fastest_ip opt-in
 		DualStack:  DualStack{ThresholdMs: 10, Exclude: []string{}},                                // opt-in: see DualStack
+		IPAlias:    IPAlias{},                                                                      // opt-in: pin CDN answers to a chosen edge
 		DNSSEC:     DNSSEC{Exclude: []string{}},
 		Tuning:     Tuning{UDPBufferBytes: 16777216},
 		Webserver:  Webserver{Listen: "127.0.0.1:8083", PrometheusACL: []string{"127.0.0.1/32"}},

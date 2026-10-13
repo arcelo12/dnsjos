@@ -102,6 +102,19 @@ export interface DualStack {
   exclude: string[] // names + subdomains never touched
 }
 
+/** IP-alias (smartdist ip-rules): pin A/AAAA answers inside a CDN range to a chosen edge IP. */
+export interface IPAliasRule {
+  name: string
+  match_pools: string[] // CIDR ranges; an answer inside one of them is rewritten
+  targets: string[] // preferred addresses, same family, used round-robin
+  exclude: string[] // names + subdomains never rewritten by this rule
+}
+
+export interface IPAlias {
+  enabled: boolean
+  rules: IPAliasRule[]
+}
+
 /** SPEC §6.10: dnsdist sets the CD bit so upstreams (Unbound, public resolvers) skip DNSSEC validation. */
 export interface DNSSEC {
   disable_validation: boolean // CD on every query
@@ -162,6 +175,7 @@ export interface ConfigSpec {
   cgk: CGK
   speed_check: SpeedCheck
   dualstack: DualStack
+  ip_alias: IPAlias
   dnssec: DNSSEC
   tuning: Tuning
   webserver: Webserver
