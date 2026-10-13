@@ -8,6 +8,8 @@ import { createRequire } from 'node:module'
 const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_CORE || 'playwright-core')
 const BASE = process.env.PANEL || 'http://127.0.0.1:28080'
 const OUT = process.env.OUT || new URL('./screenshots/', import.meta.url).pathname
+// SCALE=2 renders at device-pixel-ratio 2 (the README screenshots use 2x).
+const SCALE = Number(process.env.SCALE || 1)
 const only = process.argv[2]
 mkdirSync(OUT, { recursive: true })
 
@@ -34,12 +36,15 @@ const steps = [
   ['node-overview', firstNode],
   ['node-abuse', firstNode, tab(/^Abuse/)],
   ['node-cgk', firstNode, tab('CGK')],
+  ['node-dualstack', firstNode, tab('Dual-stack')],
+  ['node-speedcheck', firstNode, tab('Speed check')],
+  ['node-versions', firstNode, tab(/^Versions/)],
   ['node-config', firstNode, tab('Config')],
   ['node-actions', firstNode, tab('Actions')],
   ['profiles', '/profiles'],
   ['profiles-new', '/profiles', btn(/new profile/i)],
-  ...['Listeners', 'ACL', 'Upstreams', 'Cache', 'Blocking', 'Abuse', 'CGK', 'Analytics', 'Tuning'].map((t) => [
-    'profile-' + t.toLowerCase(),
+  ...['Listeners', 'ACL', 'Upstreams', 'Cache', 'Blocking', 'Abuse', 'CGK', 'Speed check', 'CNAME', 'Dual-stack', 'IP-alias', 'DNSSEC', 'Analytics', 'Tuning'].map((t) => [
+    'profile-' + t.toLowerCase().replaceAll(' ', '-'),
     defaultProfile,
     tab(t),
   ]),
@@ -65,7 +70,7 @@ for (const theme of ['light', 'dark'])
     [1440, 900, 'desktop'],
     [390, 844, 'mobile'],
   ]) {
-    const ctx = await browser.newContext({ viewport: { width: vw, height: vh }, colorScheme: theme })
+    const ctx = await browser.newContext({ viewport: { width: vw, height: vh }, colorScheme: theme, deviceScaleFactor: SCALE })
     await ctx.addInitScript((t) => localStorage.setItem('dnsjos-theme', t), theme)
     const p = await ctx.newPage()
     let cur = ''

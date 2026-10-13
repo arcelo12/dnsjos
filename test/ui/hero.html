@@ -1,0 +1,75 @@
+<!doctype html>
+<!--
+  README hero (docs/screenshots/hero.webp), 1000x525 CSS px rendered at 2x.
+  Needs three shots from `SCALE=2 node test/ui/shots.mjs`, cropped to one screen,
+  in ./shots/ next to a copy of this file:
+    overview-light-desktop.png (2880x1800), node-overview-dark-desktop.png (2880x1800),
+    overview-dark-mobile.png (780x1688)
+  Fonts load from web/node_modules (run `pnpm -C web install` first).
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face { font-family: Figtree; src: url(FONTS/@fontsource-variable/figtree/files/figtree-latin-wght-normal.woff2) format("woff2"); font-weight: 300 900; }
+  @font-face { font-family: "Instrument Serif"; src: url(FONTS/@fontsource/instrument-serif/files/instrument-serif-latin-400-normal.woff2) format("woff2"); }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1000px; height: 525px; overflow: hidden; }
+  body {
+    font-family: Figtree, system-ui, sans-serif; color: #e6efe9;
+    background:
+      radial-gradient(520px 340px at 8% 108%, rgba(111, 179, 167, 0.32), transparent 70%),
+      radial-gradient(600px 420px at 92% -10%, rgba(111, 179, 167, 0.14), transparent 70%),
+      linear-gradient(160deg, #16252a 0%, #0f1b1e 55%, #0b1517 100%);
+    position: relative;
+  }
+  body::before { /* faint grid */
+    content: ""; position: absolute; inset: 0; opacity: 0.35;
+    background-image: linear-gradient(rgba(215, 236, 228, 0.05) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(215, 236, 228, 0.05) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: linear-gradient(90deg, #000 0%, #000 45%, transparent 75%);
+  }
+  .copy { position: absolute; left: 52px; top: 70px; width: 410px; }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand svg { width: 46px; height: 46px; border-radius: 12px; box-shadow: 0 0 0 1px rgba(215, 236, 228, 0.12); }
+  .brand b { font-family: "Instrument Serif", serif; font-weight: 400; font-size: 40px; letter-spacing: 0.2px; }
+  .brand small { display: block; font-size: 9.5px; letter-spacing: 3px; color: #8fb3aa; margin-top: -4px; }
+  h1 { margin-top: 30px; font-family: "Instrument Serif", serif; font-weight: 400; font-size: 47px; line-height: 1.02; letter-spacing: -0.3px; }
+  h1 em { font-style: italic; color: #a9dccf; }
+  p.lead { margin-top: 16px; font-size: 14.2px; line-height: 1.5; color: #b9cdc6; }
+  .pills { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .pills span { font-size: 11.5px; padding: 6px 11px; border-radius: 999px; background: rgba(215, 236, 228, 0.07);
+    border: 1px solid rgba(169, 220, 207, 0.22); color: #d7ece4; }
+  .pills b { color: #a9dccf; font-weight: 650; }
+  .stage { position: absolute; inset: 0; perspective: 1600px; }
+  .shot { position: absolute; border-radius: 10px; overflow: hidden; box-shadow: 0 30px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(215, 236, 228, 0.14); }
+  .shot img { display: block; width: 100%; }
+  .light { width: 560px; left: 540px; top: 46px; transform: rotateY(-16deg) rotateX(4deg); opacity: 0.96; }
+  .dark { width: 540px; left: 470px; top: 150px; transform: rotateY(-16deg) rotateX(4deg); }
+  .phone { width: 168px; left: 820px; top: 222px; border-radius: 26px; padding: 6px; background: #0b1214;
+    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(215, 236, 228, 0.22); transform: rotateY(-10deg); }
+  .phone img { border-radius: 20px; }
+</style>
+</head>
+<body>
+  <div class="copy">
+    <div class="brand">
+      <svg viewBox="0 0 32 32"><defs><linearGradient id="g" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#6fb3a7"/><stop offset="1" stop-color="#d7ece4"/></linearGradient></defs><rect width="32" height="32" rx="8" fill="#141f22"/><g fill="none" stroke="url(#g)" stroke-linecap="round" stroke-width="1.8"><path d="M9 17.5a5.5 5.5 0 0 1 5.5 5.5"/><path d="M9 12a11 11 0 0 1 11 11" opacity=".75"/><path d="M9 6.5A16.5 16.5 0 0 1 25.5 23" opacity=".5"/></g><circle cx="9" cy="23" r="2.2" fill="url(#g)"/></svg>
+      <div><b>DnsJos</b><small>FLEET CONTROL</small></div>
+    </div>
+    <h1>Run a fleet of <em>dnsdist</em> resolvers like one.</h1>
+    <p class="lead">One panel to monitor, configure and upgrade every node, build the blocklist once,
+      and roll out changes one node at a time without dropping a query.</p>
+    <div class="pills">
+      <span><b>~50 MB</b> panel</span><span><b>~25 MB</b> agent</span><span>Health-gated rollouts</span>
+      <span>Blocklist → CDB</span><span>Unbound / PowerDNS Recursor</span><span>ECS · DNSSEC control</span>
+    </div>
+  </div>
+  <div class="stage">
+    <div class="shot light"><img src="shots/overview-light-desktop.png"></div>
+    <div class="shot dark"><img src="shots/node-overview-dark-desktop.png"></div>
+    <div class="shot phone"><img src="shots/overview-dark-mobile.png"></div>
+  </div>
+</body>
+</html>

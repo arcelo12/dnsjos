@@ -4,7 +4,8 @@
 
 <p align="center">
   <b>A small, fast control panel for fleets of <a href="https://dnsdist.org">dnsdist</a> resolvers.</b><br>
-  Monitor every node, change config safely, build the blocklist once, and report on what was blocked.
+  Monitor every node, change config safely, build the blocklist once, resolve on your own
+  recursors, and report on what was blocked.
 </p>
 
 <p align="center">
@@ -78,8 +79,8 @@ to its previous version.
 ### 🧱 Blocklist built once
 The panel downloads TrustPositif and your own lists in parallel (byte ranges over
 several connections). It merges them into one **CDB** file, and every node downloads
-that finished file, checksum-verified. The allowlist unblocks a wrongly listed CDN
-within ~15 s, with no restart.
+that finished file, checksum-verified. **Per-profile lists** let a profile block more
+than the global set. The allowlist unblocks a wrongly listed CDN within ~15 s, with no restart.
 
 </td>
 </tr>
@@ -87,10 +88,13 @@ within ~15 s, with no restart.
 <td valign="top">
 
 ### ⚖️ Smarter resolving
-- **`whashedLatency`**: a lock-free Lua FFI policy. The same name goes to the same
-  upstream, but a slow upstream automatically gets fewer names.
-- **Serve-stale** keeps answering from cache, for up to an hour, when every upstream is down.
-- **CGK steering** points Cloudflare answers at edges that are fast from your network.
+- **Your own recursor**: the installer can add **Unbound** or **PowerDNS Recursor** on
+  each node, so dnsdist stops forwarding to public resolvers.
+- **ECS per upstream**: CDNs answer for the customer's subnet, never for private or
+  CGNAT addresses, and spoofed client subnets are replaced.
+- **DNSSEC** validation can be switched off per profile, or skipped only for zones with
+  broken signatures (one click from the SERVFAIL list).
+- **`whashedLatency`** and **serve-stale** keep answers fast and flowing when an upstream is slow or down.
 
 </td>
 <td valign="top">
@@ -99,6 +103,27 @@ within ~15 s, with no restart.
 Top queried domains (raw or grouped by registered domain), NXDOMAIN/SERVFAIL names
 and the query-type mix, with no client addresses stored. Yearly blocked-query
 reports per node and top blocked domains, exportable as CSV.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🧭 Answer shaping
+smartdns-style features, measured from each node:
+- **Fastest IP / fastest response**: answer with the addresses that connect fastest.
+- **Dual-stack selection**: drop the slower address family for a name.
+- **CNAME mapping**, **IP-alias** (pin a CDN to a chosen edge) and **CGK steering** for
+  Cloudflare edges that are fast from your network.
+
+</td>
+<td valign="top">
+
+### 🛠️ One-line node install
+`curl … | sh` installs dnsdist and the agent, and can add a local recursor with ECS
+(`--with-unbound` or `--with-recursor`, `--with-ecs`). It tunes the kernel and NIC for DNS
+(socket buffers, port range, packet spreading over every core). Already running dnsdist?
+**Adopt** it without dropping a query.
 
 </td>
 </tr>
@@ -136,7 +161,7 @@ reports per node and top blocked domains, exportable as CSV.
 <td width="50%"><img src="docs/screenshots/nodes.webp" alt="Nodes"><br><sub><b>Nodes</b>: status, load, latency, versions, and config/blocklist sync.</sub></td>
 </tr>
 <tr>
-<td><img src="docs/screenshots/profile-upstreams.webp" alt="Profile editor"><br><sub><b>Profiles</b>: every dnsdist setting as a form, with version history and one-click publish.</sub></td>
+<td><img src="docs/screenshots/profile-upstreams.webp" alt="Profile editor"><br><sub><b>Profiles</b>: every dnsdist setting as a form, here the upstreams with per-upstream ECS, plus version history and one-click publish.</sub></td>
 <td><img src="docs/screenshots/profile-preview.webp" alt="Rendered config preview"><br><sub><b>Preview</b>: the exact Lua each node will run, with secrets masked.</sub></td>
 </tr>
 <tr>
@@ -145,7 +170,11 @@ reports per node and top blocked domains, exportable as CSV.
 </tr>
 <tr>
 <td><img src="docs/screenshots/blocklist.webp" alt="Blocklist"><br><sub><b>Blocklist</b>: builds, lookup and the emergency allowlist.</sub></td>
-<td><img src="docs/screenshots/add-node.webp" alt="Add node"><br><sub><b>Add node</b>: a single-use token and a one-line installer.</sub></td>
+<td><img src="docs/screenshots/add-node.webp" alt="Add node"><br><sub><b>Add node</b>: a single-use token and a one-line installer, optionally with a local Unbound or PowerDNS Recursor.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/profile-dnssec.webp" alt="DNSSEC"><br><sub><b>DNSSEC</b>: validation on or off per profile, and exceptions for broken zones, added in one click from the SERVFAIL list.</sub></td>
+<td><img src="docs/screenshots/offenders.webp" alt="Offenders"><br><sub><b>Offenders</b>: clients rate-limited by the dynamic block rules, per node.</sub></td>
 </tr>
 </table>
 
@@ -172,7 +201,9 @@ flowchart LR
     end
     AG -- "pull config (ETag)<br/>download CDB<br/>heartbeat + metrics" --> API
     Clients(("Clients<br/>Do53 · DoH · DoT")) --> DD
-    DD --> Up["Upstream resolvers"]
+    DD --> Rec["Local recursor (optional)<br/>Unbound · PowerDNS Recursor<br/>127.0.0.1:5335, ECS · DNSSEC"]
+    DD -.->|fallback| Up["Upstream resolvers"]
+    Rec --> Auth["Authoritative DNS"]
 ```
 
 **A config change, end to end:**
@@ -259,6 +290,11 @@ A plain `go build ./...` always works, because placeholders are committed for th
    curl -fsSL https://PANEL/install.sh | sudo sh -s -- --token TOKEN
    ```
 
+   Add `--with-unbound` or `--with-recursor` for a local recursive resolver on
+   `127.0.0.1:5335` (then point the profile's upstreams at it), and `--with-ecs` to pass
+   client subnets on to authoritative servers. The installer also tunes the kernel and NIC
+   for DNS.
+
 The full, step-by-step production runbook (with a check after every step) is
 **[DEPLOY.md](DEPLOY.md)**.
 
@@ -324,7 +360,7 @@ approval of the plan and of each adoption.
 cmd/dnsjos            panel binary (serve | migrate | admin create | version)
 cmd/dnsjos-agent      node agent
 internal/panel/…      API, auth, blocklist builder, rollouts, analytics, reports
-internal/agent/…      apply + rollback, CDB sync, dnstap, CGK prober, upgrades
+internal/agent/…      apply + rollback, CDB sync, dnstap, CGK prober, speed check, dual-stack, upgrades
 internal/shared/…     wire types, dnsdist config renderer, CDB format
 web/                  React 19 + Vite + Tailwind v4 + shadcn/ui
 migrations/           forward-only SQL, applied at startup
