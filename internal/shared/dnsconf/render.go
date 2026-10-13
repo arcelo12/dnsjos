@@ -36,6 +36,8 @@ const (
 	FileBlocking = "dnsjos/blocking.lua"
 	FileAbuse    = "dnsjos/abuse.lua"
 	FileCGK      = "dnsjos/cgk.lua"
+	// CNAME mapping rules (smartdns' cname /domain/target, SPEC §6.11).
+	FileCName = "dnsjos/cname.lua"
 	// Owned by the agent's CGK prober, never rendered.
 	FileCGKAliases  = "dnsjos/cgk-aliases.txt"
 	FileCGKRewrite  = "dnsjos/cgk-rewrite.txt"
@@ -222,7 +224,7 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 		files[rel] = body
 		w("dofile(%s)\n", luaString(path.Join(rt.BaseDir, rel)))
 	}
-	if spec.Blocking.Enabled || spec.Abuse.Enabled || spec.CGK.Enabled || spec.DualStack.Enabled || spec.SpeedCheck.FastestIP || spec.IPAlias.Enabled {
+	if spec.Blocking.Enabled || spec.Abuse.Enabled || spec.CGK.Enabled || spec.DualStack.Enabled || spec.SpeedCheck.FastestIP || spec.IPAlias.Enabled || (spec.CName.Enabled && len(spec.CName.Rules) > 0) {
 		c.WriteString("\n")
 	}
 	if spec.Blocking.Enabled {
@@ -245,6 +247,13 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 			return nil, err
 		}
 		module(FileCGK, b)
+	}
+	if spec.CName.Enabled && len(spec.CName.Rules) > 0 {
+		b, err := renderCNames(spec.CName)
+		if err != nil {
+			return nil, err
+		}
+		module(FileCName, b)
 	}
 	if spec.DualStack.Enabled {
 		module(FileDualStack, renderDualStack(rt))

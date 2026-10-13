@@ -179,8 +179,20 @@ func (s ConfigSpec) Validate() error {
 	if _, err := ParseSpeedCheckMode(s.SpeedCheck.Mode); err != nil {
 		bad("speed_check.mode", "%v", err)
 	}
+	if m := s.SpeedCheck.AnswerMode; m != "" && m != AnswerModeFastestIP && m != AnswerModeFastestResponse {
+		bad("speed_check.answer_mode", "must be %s or %s", AnswerModeFastestIP, AnswerModeFastestResponse)
+	}
 	between("speed_check.max_reply_ip_num", s.SpeedCheck.MaxReplyIPNum, 0, 64)
+	between("speed_check.max_response", s.SpeedCheck.MaxResponse, 0, 64)
 	hostnames("speed_check.exclude", s.SpeedCheck.Exclude)
+	for i, r := range s.CName.Rules {
+		if !hostnameRe.MatchString(strings.TrimSuffix(r.Name, ".")) {
+			bad(fmt.Sprintf("cname.rules[%d].name", i), "%q is not a domain name", r.Name)
+		}
+		if !hostnameRe.MatchString(strings.TrimSuffix(r.Target, ".")) {
+			bad(fmt.Sprintf("cname.rules[%d].target", i), "%q is not a domain name", r.Target)
+		}
+	}
 	between("dualstack.threshold_ms", s.DualStack.ThresholdMs, 0, 1000)
 	hostnames("dualstack.exclude", s.DualStack.Exclude)
 	if ia := s.IPAlias; ia.Enabled {

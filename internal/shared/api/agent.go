@@ -247,6 +247,25 @@ type DualStackReport struct {
 	At      time.Time       `json:"at"`
 }
 
+// SpeedCheckReport is POST /agent/v1/speedcheck: the node's fastest-IP measurements
+// (SPEC §6.9). Names are the busiest qnames the agent measured; top_ip/top_ms is their
+// fastest address (""/-1 = none answered).
+type SpeedCheckReport struct {
+	Names   []SpeedCheckName `json:"names"`
+	Checked int              `json:"checked"` // names measured at least once
+	At      time.Time        `json:"at"`
+}
+
+// SpeedCheckName is one measured name in a SpeedCheckReport.
+type SpeedCheckName struct {
+	Name      string    `json:"name"`
+	Hits      int64     `json:"hits"`
+	TopIP     string    `json:"top_ip"` // "" = no address answered
+	TopMs     float64   `json:"top_ms"` // -1 = no address answered
+	Addresses int       `json:"addresses"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
 type CGKPool struct {
 	Net   string   `json:"net"`
 	Colos []string `json:"colos"`

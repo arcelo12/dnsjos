@@ -125,8 +125,21 @@ export interface DNSSEC {
 export interface SpeedCheck {
   mode: string // speed-check-mode: "ping,tcp:80,tcp:443" | "none" | …
   fastest_ip: boolean
+  answer_mode: '' | 'fastest-ip' | 'fastest-response' // §6.11: reorder+merge or overwrite top N
   max_reply_ip_num: number // 0..64, 0 = 8
+  max_response: number // 0..64, 0 = 2; top N of fastest-response
   exclude: string[]
+}
+
+/** SPEC §6.11: smartdns' cname /domain/target — resolve Name as Target. */
+export interface CNameRule {
+  name: string
+  target: string
+}
+
+export interface CNames {
+  enabled: boolean
+  rules: CNameRule[]
 }
 
 /** SPEC §6.8: a name whose A or AAAA answers the node drops. */
@@ -138,6 +151,22 @@ export interface DualStackName {
   ttl: number
   hits: number
   checked_at: string
+}
+
+/** §6.9: one name the agent speed-checked for fastest-IP answers (qname with its fastest address). */
+export interface SpeedCheckName {
+  name: string
+  hits: number
+  top_ip: string // "" = no address answered
+  top_ms: number // -1 = no address answered
+  addresses: number // distinct addresses seen per answer (measured + unmeasured)
+  checked_at: string
+}
+
+export interface SpeedCheckReport {
+  names: SpeedCheckName[]
+  checked: number // names measured at least once
+  at: string // 0001-01-01… before the first report
 }
 
 export interface DualStackReport {
@@ -174,6 +203,7 @@ export interface ConfigSpec {
   abuse: Abuse
   cgk: CGK
   speed_check: SpeedCheck
+  cname: CNames
   dualstack: DualStack
   ip_alias: IPAlias
   dnssec: DNSSEC

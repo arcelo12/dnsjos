@@ -23,6 +23,7 @@ import type {
   BlocklistSourcePatch,
   CGKLearnedReport,
   DualStackReport,
+  SpeedCheckReport,
   CGKReport,
   Command,
   CommandRequest,
@@ -171,6 +172,7 @@ export const api = {
     cgk: (id: string) => get<CGKReport | null>(`${V1}/nodes/${id}/cgk`),
     cgkLearned: (id: string) => get<CGKLearnedReport>(`${V1}/nodes/${id}/cgk/learned`),
     dualstack: (id: string) => get<DualStackReport>(`${V1}/nodes/${id}/dualstack`),
+    speedcheck: (id: string) => get<SpeedCheckReport>(`${V1}/nodes/${id}/speedcheck`),
   },
   enrollment: {
     list: () => get<List<EnrollmentToken>>(`${V1}/enrollment-tokens`),
@@ -263,6 +265,7 @@ export const qk = {
   nodeCGK: (id: string) => ['nodes', id, 'cgk'] as const,
   nodeCGKLearned: (id: string) => ['nodes', id, 'cgk', 'learned'] as const,
   nodeDualStack: (id: string) => ['nodes', id, 'dualstack'] as const,
+  nodeSpeedCheck: (id: string) => ['nodes', id, 'speedcheck'] as const,
   nodeVersions: (id: string) => ['nodes', id, 'versions'] as const,
   upgrades: ['upgrades'] as const,
   upgrade: (id: number) => ['upgrades', id] as const,
@@ -329,6 +332,8 @@ export const useNodeCGKLearned = (id: string) =>
   useQuery({ queryKey: qk.nodeCGKLearned(id), queryFn: () => api.nodes.cgkLearned(id), refetchInterval: 60_000 })
 export const useNodeDualStack = (id: string) =>
   useQuery({ queryKey: qk.nodeDualStack(id), queryFn: () => api.nodes.dualstack(id), refetchInterval: 60_000 })
+export const useNodeSpeedCheck = (id: string) =>
+  useQuery({ queryKey: qk.nodeSpeedCheck(id), queryFn: () => api.nodes.speedcheck(id), refetchInterval: 60_000 })
 export const useNodeVersions = (id: string) =>
   useQuery({ queryKey: qk.nodeVersions(id), queryFn: () => api.nodes.versions(id), refetchInterval: LIVE })
 export const useUpgrades = () => useQuery({ queryKey: qk.upgrades, queryFn: api.upgrades.list, refetchInterval: LIVE })

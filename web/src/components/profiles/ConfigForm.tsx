@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import type { SpecErrors } from '@/lib/api/profiles'
-import { DYN_ACTIONS, type ConfigSpec, type DynAction, type Listen } from '@/lib/api/types'
+import { DYN_ACTIONS, type ConfigSpec, type DynAction, type Listen, type SpeedCheck } from '@/lib/api/types'
 import { fmtBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { TABS, tabOf, useFieldErrors, useReadOnly, type TabId } from './context'
@@ -56,7 +56,7 @@ export function ConfigForm({
   const errTabs = new Set(Object.keys(errors).map(tabOf))
 
   const { do53, doh, dot, tls } = s.listen
-  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds, speed_check: sc, dnssec: dn, ip_alias: ia } = s
+  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds, speed_check: sc, dnssec: dn, ip_alias: ia, cname: cn } = s
 
   return (
     <Tabs value={tab} onValueChange={(t) => onTabChange(t as TabId)} className="gap-4">
@@ -327,6 +327,39 @@ export function ConfigForm({
               max={64}
               help="max-reply-ip-num: at most this many addresses per answer. 0 = 8."
             />
+            <div className="grid content-start gap-1.5">
+              <Label htmlFor="sc-answer-mode">Answer mode</Label>
+              <Select
+                value={sc.answer_mode || 'fastest-ip'}
+                onValueChange={(v) => part('speed_check', { answer_mode: v as SpeedCheck['answer_mode'] })}
+                disabled={ro}
+              >
+                <SelectTrigger id="sc-answer-mode" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="fastest-ip">fastest-ip (reorder + merge)</SelectItem>
+                  <SelectItem value="fastest-response">fastest-response (overwrite top N)</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {sc.answer_mode === 'fastest-response'
+                  ? 'The whole answer is overwritten with the measured addresses, round-robin: every resolver for a name hands out different addresses, so the measured set wins over the upstream\'s order. Answers whose measured set is smaller than the top N pass unchanged.'
+                  : 'smartdns: the fastest address first, then only the ones nearly as fast; measured addresses missing from the answer are appended.'}
+              </p>
+              <Errors path="speed_check.answer_mode" />
+            </div>
+            {sc.answer_mode === 'fastest-response' && (
+              <NumField
+                label="Top N"
+                path="speed_check.max_response"
+                value={sc.max_response}
+                onChange={(max_response) => part('speed_check', { max_response })}
+                min={0}
+                max={64}
+                help="Top this many measured addresses per answer, round-robin. 0 = 2."
+              />
+            )}
           </Grid>
           <ListEditor
             label="Exclude"
@@ -336,6 +369,36 @@ export function ConfigForm({
             validate={isHostname}
             what="domain"
             help="Names (and their subdomains) whose answers are never reordered (domain-rules -speed-check-mode none)."
+          />
+        </Section>
+      </TabsContent>
+
+      <TabsContent value="cname" className="grid gap-4">
+        <Section
+          title="CNAME mapping"
+          description="smartdns' cname /domain/target: queries for a mapped name (with subdomains) are resolved under the target; the client still gets the answer under the name it asked. Rules are checked in order; the first match wins."
+          enabled={cn.enabled}
+          onEnabledChange={(enabled) => part('cname', { enabled })}
+        >
+          <ListEditor
+            label="Rules"
+            path="cname.rules"
+            value={cn.rules.map((r) => `${r.name}=${r.target}`)}
+            onChange={(vs) =>
+              part('cname', {
+                rules: vs.map((v) => {
+                  const [name, ...rest] = v.split('=')
+                  return { name: name ?? '', target: rest.join('=') }
+                }),
+              })
+            }
+            validate={(v) => {
+              const [n, t] = v.split('=')
+              return !!n && !!t && isHostname(n) && isHostname(t)
+            }}
+            what="name=target mapping"
+            placeholder="mirror.example.com=fast.example.net"
+            help="One per line, format: name=target. Queries for name (and its subdomains) are resolved as target; the client still gets the answer under name. Subdomains follow automatically."
           />
         </Section>
       </TabsContent>

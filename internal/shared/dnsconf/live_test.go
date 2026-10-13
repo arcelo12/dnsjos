@@ -42,14 +42,12 @@ type liveDnsdist struct {
 
 // startDnsdist runs the rendered config (blocking + response IPs, CDB: blocked.example
 // and 192.0.2.1) in a real dnsdist against a backend answering the A records in ips;
-// it skips when dnsdist is not on PATH.
-func startDnsdist(t *testing.T, ips map[string][]string) *liveDnsdist {
-	return startDnsdistMut(t, ips, nil)
+// it skips when dnsdist is not on PATH; mut adjusts the default spec before rendering.
+func startDnsdist(t *testing.T, ips map[string][]string, mut ...func(*api.ConfigSpec)) *liveDnsdist {
+	return startDnsdistMut(t, ips, mut...)
 }
 
-// startDnsdistMut is startDnsdist with a final chance to adjust the spec (e.g. enable
-// ip-alias with a rule for the test).
-func startDnsdistMut(t *testing.T, ips map[string][]string, mutate func(*api.ConfigSpec)) *liveDnsdist {
+func startDnsdistMut(t *testing.T, ips map[string][]string, mut ...func(*api.ConfigSpec)) *liveDnsdist {
 	bin, err := exec.LookPath("dnsdist")
 	if err != nil {
 		t.Skip("dnsdist not on PATH")
@@ -110,8 +108,8 @@ func startDnsdistMut(t *testing.T, ips map[string][]string, mutate func(*api.Con
 	spec.DualStack.Enabled = true
 	spec.SpeedCheck.FastestIP = true
 	spec.Analytics.StreamAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t)) // nobody listens; fine
-	if mutate != nil {
-		mutate(&spec)
+	for _, m := range mut {
+		m(&spec)
 	}
 	rt := testRT
 	rt.BaseDir, rt.CDBPath = d.dir, cdbPath
@@ -148,11 +146,19 @@ func startDnsdistMut(t *testing.T, ips map[string][]string, mutate func(*api.Con
 		return nil
 	}
 	d.console = func(command string) string {
-		out, err := exec.Command(bin, "-C", d.conf, "-c", "-e", command).CombinedOutput()
-		if err != nil {
-			t.Fatalf("console %s: %v: %s", command, err, out)
+		// The console socket accepts connections a moment after start: retry briefly instead
+		// of failing the test on the startup race.
+		var out []byte
+		var err error
+		for range 50 {
+			out, err = exec.Command(bin, "-C", d.conf, "-c", "-e", command).CombinedOutput()
+			if err == nil {
+				return string(out)
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		return string(out)
+		t.Fatalf("console %s: %v: %s", command, err, out)
+		return ""
 	}
 	return d
 }
@@ -346,6 +352,47 @@ func TestLiveDualStack(t *testing.T) {
 // answers are smartdns' (_dns_rrs_add_all_best_ip): the fastest first, then those nearly as
 // fast, unmeasured / unanswered ones dropped, a CNAME chain flattened, EDNS kept, and the
 // same from the cache.
+// TestLiveCName: smartdns' cname /domain/target (§6.11): the query is resolved under the
+// target and the answer (A records and the CNAME chain) comes back under the asked name.
+func TestLiveCName(t *testing.T) {
+	d := startDnsdist(t, map[string][]string{
+		"cdn.example.": {"198.51.100.7"}, "other.example.": {"198.51.100.9"},
+	})
+	spec := api.DefaultConfigSpec()
+	spec.CName = api.CNames{Enabled: true, Rules: []api.CNameRule{{Name: "mir.example", Target: "cdn.example"}}}
+	rt := testRT
+	rt.BaseDir = d.dir
+	files, err := Render(spec, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d.dir, FileCName), files[FileCName], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out := d.console(fmt.Sprintf(`dofile(%q)`, filepath.Join(d.dir, FileCName))); out != "" {
+		t.Fatalf("dofile of cname.lua: %s", out)
+	}
+
+	r := d.query("mir.example.", dns.TypeA)
+	if len(r.Answer) != 1 {
+		t.Fatalf("mir: %v", r.Answer)
+	}
+	a, ok := r.Answer[0].(*dns.A)
+	if !ok || a.Hdr.Name != "mir.example." || a.A.String() != "198.51.100.7" {
+		t.Errorf("mir: want A mir.example. 198.51.100.7, got %v", r.Answer)
+	}
+	r = d.query("sub.mir.example.", dns.TypeA) // subdomains follow; owner is rewritten back
+	if len(r.Answer) != 1 {
+		t.Fatalf("sub.mir: %v", r.Answer)
+	}
+	if a := r.Answer[0].(*dns.A); a.A.String() != "198.51.100.7" || a.Hdr.Name != "sub.mir.example." || r.Question[0].Name != "sub.mir.example." {
+		t.Errorf("sub.mir: want question/owner sub.mir.example. A 198.51.100.7, got question %q answer %v", r.Question[0].Name, r.Answer)
+	}
+	if r := d.query("other.example.", dns.TypeA); len(r.Answer) != 1 || r.Answer[0].(*dns.A).A.String() != "198.51.100.9" {
+		t.Errorf("other (unmapped): %v", r.Answer)
+	}
+}
+
 func TestLiveFastestIP(t *testing.T) {
 	d := startDnsdist(t, map[string][]string{
 		"multi.example.": {"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4", "198.51.100.5",

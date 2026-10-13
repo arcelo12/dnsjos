@@ -47,6 +47,18 @@ func TestGolden(t *testing.T) {
 					Targets: []string{"2606:4700:3030::6810:3459"}},
 			}}
 		},
+		"fastest_response": func(s *api.ConfigSpec) { // §6.11: overwrite with the Top N
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.SpeedCheck.FastestIP = true
+			s.SpeedCheck.AnswerMode, s.SpeedCheck.MaxResponse = api.AnswerModeFastestResponse, 3
+		},
+		"cname": func(s *api.ConfigSpec) { // §6.11: smartdns cname /domain/target
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.CName = api.CNames{Enabled: true, Rules: []api.CNameRule{
+				{Name: "Mirror.Example.Com.", Target: "fast.example.net"},
+				{Name: "cdn.example.id", Target: "Edge.Example.Net."},
+			}}
+		},
 		"response_ips": func(s *api.ConfigSpec) { // opt-in (off by default)
 			s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false
 			s.Blocking.BlockResponseIPs = true

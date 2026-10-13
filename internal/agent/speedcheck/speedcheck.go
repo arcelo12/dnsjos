@@ -156,17 +156,71 @@ func OutboundIPv6() netip.Addr {
 	return ap.Addr().WithZone("")
 }
 
-// NetProber resolves through Resolver (ip:port, the node's upstream) and probes over the
-// network.
-type NetProber struct{ Resolver string }
+// NetProber resolves through Resolvers (ip:port, the node's upstreams) and probes over
+// the network. Multi-upstream aggregation (smartdist's parallel upstreams, SPEC §6.9):
+// every resolver is queried in parallel and the answers are merged — many domains hand
+// out different addresses per recursor, so one resolver alone never sees them all.
+type NetProber struct{ Resolvers []string }
 
 func (p NetProber) Resolve(ctx context.Context, name string) Answer {
+	type out struct {
+		a Answer
+	}
+	res := make([]out, len(p.Resolvers))
+	var wg sync.WaitGroup
+	for i, r := range p.Resolvers {
+		if r == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, resolver string) {
+			defer wg.Done()
+			res[i].a = resolveOne(ctx, resolver, name)
+		}(i, r)
+	}
+	wg.Wait()
+	var a Answer
+	seen4, seen6 := map[string]bool{}, map[string]bool{}
+	for _, o := range res {
+		for _, ip := range o.a.V4 {
+			if !seen4[ip] { // first-seen order = upstream preference order
+				seen4[ip] = true
+				a.V4 = append(a.V4, ip)
+			}
+		}
+		for _, ip := range o.a.V6 {
+			if !seen6[ip] {
+				seen6[ip] = true
+				a.V6 = append(a.V6, ip)
+			}
+		}
+		if len(o.a.V4) > 0 { // lowest TTL across the answers that contributed
+			a.TTL4 = minTTL(a.TTL4, o.a.TTL4)
+		}
+		if len(o.a.V6) > 0 {
+			a.TTL6 = minTTL(a.TTL6, o.a.TTL6)
+		}
+	}
+	return a
+}
+
+func minTTL(a, b uint32) uint32 {
+	if a == 0 {
+		return b
+	}
+	if b == 0 {
+		return a
+	}
+	return min(a, b)
+}
+
+func resolveOne(ctx context.Context, resolver, name string) Answer {
 	var a Answer
 	for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(name), t)
 		c := &dns.Client{Timeout: 3 * time.Second}
-		r, _, err := c.ExchangeContext(ctx, m, p.Resolver)
+		r, _, err := c.ExchangeContext(ctx, m, resolver)
 		if err != nil {
 			continue
 		}

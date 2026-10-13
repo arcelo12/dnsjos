@@ -204,6 +204,12 @@ func (c *Client) PostDualStack(ctx context.Context, r api.DualStackReport) error
 	return err
 }
 
+// PostSpeedCheck reports the node's fastest-IP measurements (SPEC §6.9).
+func (c *Client) PostSpeedCheck(ctx context.Context, r api.SpeedCheckReport) error {
+	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/speedcheck", r, nil, nil)
+	return err
+}
+
 // Allowlist fetches the active allowlist; version is the applied one ("" = none). nil
 // with nil error means 304 (unchanged).
 func (c *Client) Allowlist(ctx context.Context, version string) (*api.Allowlist, error) {
