@@ -633,7 +633,7 @@ only rewrites):
   `POST /agent/v1/speedcheck` (`SpeedCheckReport`: busiest names with hits, fastest
   address, its time, address count, checked_at; capped at 512 names). The panel keeps the
   latest per node (`nodes.speedcheck`, `speedcheck_checked`, `speedcheck_at`, migration
-  `0013`) and serves it at `GET /api/v1/nodes/{id}/speedcheck`, shown on the node's Speed
+  `0014`) and serves it at `GET /api/v1/nodes/{id}/speedcheck`, shown on the node's Speed
   check tab (the qname view the profile editor never had).
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
