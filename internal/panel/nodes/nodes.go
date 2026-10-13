@@ -17,6 +17,7 @@ import (
 
 	"github.com/billyriantono/dnsjos/internal/panel/app"
 	"github.com/billyriantono/dnsjos/internal/panel/audit"
+	"github.com/billyriantono/dnsjos/internal/panel/blocklist"
 	"github.com/billyriantono/dnsjos/internal/panel/db"
 	"github.com/billyriantono/dnsjos/internal/panel/httpx"
 	"github.com/billyriantono/dnsjos/internal/panel/install"
@@ -97,14 +98,60 @@ func configVersion(v int, profileKey string, overrides []byte) int {
 // profileKeySQL is configVersion's profileKey for the joined config_profiles p.
 const profileKeySQL = `CASE WHEN p.name = 'default' THEN '' ELSE p.id::text END`
 
-// currentBuild returns the newest ok blocklist build (empty when there is none).
-func currentBuild(ctx context.Context, q db.Querier) (sha string, size int64, err error) {
-	err = q.QueryRow(ctx, `SELECT sha256, size_bytes FROM blocklist_builds WHERE status = 'ok'
-		ORDER BY finished_at DESC NULLS LAST, id DESC LIMIT 1`).Scan(&sha, &size)
-	if db.IsNotFound(err) {
-		err = nil
+// currentBuild returns the CDB to serve one profile: the profile's newest ok build, or the
+// global build when the profile has none of its own (SPEC §7.1). An empty profileID asks
+// for the global build directly. sha is empty when neither scope has a build.
+func currentBuild(ctx context.Context, q db.Querier, profileID string) (sha string, size int64, err error) {
+	b, err := blocklist.Current(ctx, q, profileID)
+	if err != nil || b != nil || profileID == "" {
+		return buildSHA(b), buildSize(b), err
 	}
-	return
+	b, err = blocklist.Current(ctx, q, "") // fall back to the global build
+	return buildSHA(b), buildSize(b), err
+}
+
+func buildSHA(b *api.BlocklistBuild) string {
+	if b == nil {
+		return ""
+	}
+	return b.SHA256
+}
+
+func buildSize(b *api.BlocklistBuild) int64 {
+	if b == nil {
+		return 0
+	}
+	return b.SizeBytes
+}
+
+// currentBuildForNode is currentBuild for a node: it resolves the node's profile first and
+// serves that profile's build, falling back to the global one.
+func currentBuildForNode(ctx context.Context, q db.Querier, nodeID string) (sha string, size int64, err error) {
+	profileID, err := nodeProfileID(ctx, q, nodeID)
+	if err != nil {
+		return "", 0, err
+	}
+	return currentBuild(ctx, q, profileID)
+}
+
+// nodeProfileID resolves the profile whose blocklist a node should be served: the node's own
+// profile, or the "default" profile when it is unset. It returns "" when that profile has no
+// config row at all, so the caller falls back to the global build.
+func nodeProfileID(ctx context.Context, q db.Querier, nodeID string) (string, error) {
+	var id *string
+	err := q.QueryRow(ctx, `SELECT p.id::text FROM nodes n
+		JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
+		WHERE n.id = $1`, nodeID).Scan(&id)
+	if db.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if id == nil {
+		return "", nil
+	}
+	return *id, nil
 }
 
 // profileSpec returns the newest published spec of a profile (nil id = "default"), or
@@ -166,6 +213,7 @@ func writeOverridesErr(w http.ResponseWriter, r *http.Request, field string, err
 
 const nodeSelect = `
 SELECT n.id, n.name, n.hostname, n.public_ip, n.labels, n.status, n.profile_id, coalesce(p.name, ''),
+       coalesce(p.id::text, ''),
        n.overrides, n.enrolled_at, n.last_seen_at, n.agent_version, n.dnsdist_version, n.os, n.arch,
        n.applied_config_version, n.applied_blocklist_sha256, n.last_error, n.created_at, pv.version, ` + profileKeySQL + `,
        n.dnsdist_candidate, n.dnsdist_available, n.dnsdist_repo_series, n.inventory_at, n.last_upgrade
@@ -175,8 +223,34 @@ LEFT JOIN LATERAL (SELECT version FROM config_versions v WHERE v.profile_id = p.
                    AND (n.config_pin IS NULL OR v.version <= n.config_pin) ORDER BY v.version DESC LIMIT 1) pv ON true
 WHERE n.deleted_at IS NULL`
 
+// desiredBlocklists maps every scope with a build to the sha of the CDB its nodes should run:
+// each profile that has its own build, plus "" (the global build) for profiles that fall back.
+// A profile missing from the map has no build of its own and no global build to fall back on.
+func desiredBlocklists(ctx context.Context, q db.Querier) (map[string]string, error) {
+	rows, _ := q.Query(ctx, `
+		SELECT coalesce(profile_id::text, ''), sha256 FROM blocklist_builds b
+		WHERE status = 'ok' AND sha256 = (
+			SELECT sha256 FROM blocklist_builds WHERE status = 'ok' AND profile_id IS NOT DISTINCT FROM b.profile_id
+			ORDER BY finished_at DESC NULLS LAST, id DESC LIMIT 1)
+		GROUP BY profile_id, sha256`)
+	type scopeSHA struct{ profile, sha string }
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (scopeSHA, error) {
+		var x scopeSHA
+		err := row.Scan(&x.profile, &x.sha)
+		return x, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, len(items))
+	for _, it := range items {
+		m[it.profile] = it.sha
+	}
+	return m, nil
+}
+
 func (s *svc) queryNodes(ctx context.Context, where string, args ...any) ([]api.Node, error) {
-	blSHA, _, err := currentBuild(ctx, s.d.Pool)
+	desired, err := desiredBlocklists(ctx, s.d.Pool)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +259,9 @@ func (s *svc) queryNodes(ctx context.Context, where string, args ...any) ([]api.
 		var n api.Node
 		var pv *int
 		var pkey *string
+		var profileID string
 		err := row.Scan(&n.ID, &n.Name, &n.Hostname, &n.PublicIP, &n.Labels, &n.Status, &n.ProfileID, &n.ProfileName,
+			&profileID,
 			&n.Overrides, &n.EnrolledAt, &n.LastSeenAt, &n.AgentVersion, &n.DnsdistVersion, &n.OS, &n.Arch,
 			&n.AppliedConfigVersion, &n.AppliedBlocklistSHA256, &n.LastError, &n.CreatedAt, &pv, &pkey,
 			&n.DnsdistCandidate, &n.DnsdistAvailable, &n.DnsdistRepoSeries, &n.InventoryAt, &n.LastUpgrade)
@@ -194,6 +270,11 @@ func (s *svc) queryNodes(ctx context.Context, where string, args ...any) ([]api.
 			v := configVersion(*pv, *pkey, n.Overrides)
 			n.DesiredConfigVersion = &v
 			n.ConfigInSync = n.AppliedConfigVersion != nil && *n.AppliedConfigVersion == v
+		}
+		// A profile without a build of its own is served the global one.
+		blSHA, ok := desired[profileID]
+		if !ok {
+			blSHA = desired[""]
 		}
 		n.DesiredBlocklistSHA256 = blSHA
 		n.BlocklistInSync = n.AppliedBlocklistSHA256 == blSHA
