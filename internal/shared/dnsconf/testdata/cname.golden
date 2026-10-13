@@ -71,8 +71,9 @@ dofile("/etc/dnsdist/dnsjos/cname.lua")
 local smn0 = newSuffixMatchNode()
 smn0:add(newDNSName("mirror.example.com"))
 addAction(SuffixMatchNodeRule(smn0, true), LuaAction(function(dq)
+  local orig = dq.qname:toString()
   if not dq:changeName(newDNSName("fast.example.net")) then return DNSAction.None end
-  dq:setTag("cname-origin", "mirror.example.com")
+  dq:setTag("cname-origin", orig)
   return DNSAction.None
 end), {name = "dnsjos-cname-0"})
 local tsmn0 = newSuffixMatchNode()
@@ -87,8 +88,9 @@ end), {name = "dnsjos-cname-0-back"})
 local smn1 = newSuffixMatchNode()
 smn1:add(newDNSName("cdn.example.id"))
 addAction(SuffixMatchNodeRule(smn1, true), LuaAction(function(dq)
+  local orig = dq.qname:toString()
   if not dq:changeName(newDNSName("edge.example.net")) then return DNSAction.None end
-  dq:setTag("cname-origin", "cdn.example.id")
+  dq:setTag("cname-origin", orig)
   return DNSAction.None
 end), {name = "dnsjos-cname-1"})
 local tsmn1 = newSuffixMatchNode()
