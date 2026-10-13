@@ -389,6 +389,12 @@ if [ "$WITH_RECURSOR" = 1 ]; then
 		# Clients dnsdist sends with an empty /0 (private/CGNAT): send this node's address,
 		# not 127.0.0.1, so CDNs answer for the node's location as without ECS.
 		REC_PUB4=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+		# Behind NAT (cloud VMs, a router) that source is private: sending it would leak an
+		# internal subnet, so only use a public address (the ranges dnsdist strips, render.go).
+		case $REC_PUB4 in
+		10.* | 127.* | 169.254.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[01].* | \
+			100.6[4-9].* | 100.[7-9][0-9].* | 100.1[01][0-9].* | 100.12[0-7].*) REC_PUB4='' ;;
+		esac
 		[ -z "$REC_PUB4" ] || REC_ECS="
 ecs:
   scope_zero_address: $REC_PUB4"
