@@ -11,6 +11,7 @@ import { NodeAbuseTab } from '@/components/nodes/NodeAbuseTab'
 import { NodeActionsTab } from '@/components/nodes/NodeActionsTab'
 import { NodeCGKTab } from '@/components/nodes/NodeCGKTab'
 import { NodeDualStackTab } from '@/components/nodes/NodeDualStackTab'
+import { NodeSpeedCheckTab } from '@/components/nodes/NodeSpeedCheckTab'
 import { NodeConfigTab } from '@/components/nodes/NodeConfigTab'
 import { NodeOverviewTab } from '@/components/nodes/NodeOverviewTab'
 import { NodeVersionsTab } from '@/components/nodes/NodeVersionsTab'
@@ -136,6 +137,7 @@ export default function NodeDetailPage() {
           </TabsTrigger>
           <TabsTrigger value="cgk">CGK</TabsTrigger>
           <TabsTrigger value="dualstack">Dual-stack</TabsTrigger>
+          <TabsTrigger value="speedcheck">Speed check</TabsTrigger>
           <TabsTrigger value="config">Config</TabsTrigger>
           <TabsTrigger value="versions">
             Versions
@@ -154,6 +156,9 @@ export default function NodeDetailPage() {
         </TabsContent>
         <TabsContent value="dualstack" className="mt-2">
           <NodeDualStackTab id={id} />
+        </TabsContent>
+        <TabsContent value="speedcheck" className="mt-2">
+          <NodeSpeedCheckTab id={id} />
         </TabsContent>
         <TabsContent value="config" className="mt-2">
           <NodeConfigTab key={node.id} node={node} />

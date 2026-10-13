@@ -346,6 +346,47 @@ func TestLiveDualStack(t *testing.T) {
 // answers are smartdns' (_dns_rrs_add_all_best_ip): the fastest first, then those nearly as
 // fast, unmeasured / unanswered ones dropped, a CNAME chain flattened, EDNS kept, and the
 // same from the cache.
+// TestLiveCName: smartdns' cname /domain/target (§6.11): the query is resolved under the
+// target and the answer (A records and the CNAME chain) comes back under the asked name.
+func TestLiveCName(t *testing.T) {
+	d := startDnsdist(t, map[string][]string{
+		"cdn.example.": {"198.51.100.7"}, "other.example.": {"198.51.100.9"},
+	})
+	spec := api.DefaultConfigSpec()
+	spec.CName = api.CNames{Enabled: true, Rules: []api.CNameRule{{Name: "mir.example", Target: "cdn.example"}}}
+	rt := testRT
+	rt.BaseDir = d.dir
+	files, err := Render(spec, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d.dir, FileCName), files[FileCName], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out := d.console(fmt.Sprintf(`dofile(%q)`, filepath.Join(d.dir, FileCName))); out != "" {
+		t.Fatalf("dofile of cname.lua: %s", out)
+	}
+
+	r := d.query("mir.example.", dns.TypeA)
+	if len(r.Answer) != 1 {
+		t.Fatalf("mir: %v", r.Answer)
+	}
+	a, ok := r.Answer[0].(*dns.A)
+	if !ok || a.Hdr.Name != "mir.example." || a.A.String() != "198.51.100.7" {
+		t.Errorf("mir: want A mir.example. 198.51.100.7, got %v", r.Answer)
+	}
+	r = d.query("sub.mir.example.", dns.TypeA) // subdomains follow; owner is rewritten back
+	if len(r.Answer) != 1 {
+		t.Fatalf("sub.mir: %v", r.Answer)
+	}
+	if a := r.Answer[0].(*dns.A); a.A.String() != "198.51.100.7" {
+		t.Errorf("sub.mir: want A 198.51.100.7, got %v", r.Answer)
+	}
+	if r := d.query("other.example.", dns.TypeA); len(r.Answer) != 1 || r.Answer[0].(*dns.A).A.String() != "198.51.100.9" {
+		t.Errorf("other (unmapped): %v", r.Answer)
+	}
+}
+
 func TestLiveFastestIP(t *testing.T) {
 	d := startDnsdist(t, map[string][]string{
 		"multi.example.": {"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4", "198.51.100.5",

@@ -220,8 +220,14 @@ panel on save and in the agent before rendering.
   "speed_check": {                  // §6.9: smartdns speed test
     "mode": "ping,tcp:80,tcp:443",                   // speed-check-mode ("" = this, "none"); also §6.8
     "fastest_ip": false,                             // opt-in: answers keep only the fastest addresses
+    "answer_mode": "fastest-ip",                     // §6.11: "fastest-response" = overwrite with top N
     "max_reply_ip_num": 8,                           // 0 = 8, 0..64
+    "max_response": 0,                               // top N of fastest-response, 0 = 2, 0..64
     "exclude": []                                    // names + subdomains never reordered
+  },
+  "cname": {                        // §6.11, opt-in: smartdns cname /domain/target
+    "enabled": false,
+    "rules": [{"name": "mirror.example.com", "target": "fast.example.net"}]
   },
   "dualstack": {                    // §6.8, opt-in: smartdns dualstack-ip-selection
     "enabled": false, "threshold_ms": 10,            // 0 = 10 ms, 0..1000
@@ -598,6 +604,37 @@ of CGK (§6.6): CGK measures to pick an edge, IP-alias forces one.
   each in-pool answer record, so an excluded name reached through a CNAME chain
   (`www` → `tunnel.cftunnel.com`) keeps its real addresses too.
 * Metrics: `ip-alias-rewrites`. Off by default; enable it per profile or per node (§6.3).
+
+### 6.13 Answer modes, multi-upstream aggregation, CNAME mapping
+
+The remaining smartdist features, on DnsJos' agent architecture (the node measures; dnsdist
+only rewrites):
+
+* Answer mode (`speed_check.answer_mode`, default `fastest-ip`). `fastest-ip` is smartdns'
+  `_dns_rrs_add_all_best_ip` (§6.9). `fastest-response` is smartdist's
+  `SPEEDCHECK_MODE fastest-response`: every address record of the answer is overwritten
+  with the Top `max_response` (0 = 2) measured addresses round-robin — owners, CNAMEs,
+  TTLs, authority and OPT stay; the answer is rebuilt in place by `fastest-ip.lua`. An
+  answer whose measured set has fewer addresses than the top N passes unchanged (unmeasured
+  addresses mean "unknown", not "slow": overwriting with 1 of 4 unknowns would be worse).
+* Multi-upstream aggregation (smartdist's parallel upstreams): the agent resolves every
+  due name against all of the spec's upstreams in parallel and merges the answers, first
+  seen first. Many domains hand out different addresses per recursor, so one resolver
+  alone never sees them all. The merged set is what gets measured and written to
+  `fastest-ip.txt` (§6.9); dual-stack (§6.8) resolves through the same set.
+* CNAME mapping (`cname.rules`, smartdns' `cname /domain/target`): every query for a
+  mapped name (with subdomains) is resolved under its target. dnsdist does this natively:
+  rendered `cname.lua` sets `dq.qname = newDNSName(target)` in a `LuaAction` on a
+  SuffixMatchNode rule; dnsdist restores the original question in the response, and the
+  answer records (owners are the question, by pointer) come back under the name the client
+  asked. Validation forbids non-hostnames; enabled rules render one rule each
+  (`dnsjos-cname-<i>`).
+* The panel now sees what the agent measured: every fastest-IP run posts
+  `POST /agent/v1/speedcheck` (`SpeedCheckReport`: busiest names with hits, fastest
+  address, its time, address count, checked_at; capped at 512 names). The panel keeps the
+  latest per node (`nodes.speedcheck`, `speedcheck_checked`, `speedcheck_at`, migration
+  `0013`) and serves it at `GET /api/v1/nodes/{id}/speedcheck`, shown on the node's Speed
+  check tab (the qname view the profile editor never had).
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 

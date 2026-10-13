@@ -576,9 +576,49 @@ addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), QTypeRule(DNSQType.AAAA)
 	return []byte(s.String())
 }
 
+// renderCNames is smartdns' cname /domain/target (SPEC §6.11): queries for a mapped name
+// (with subdomains) are resolved under the target, and the answer goes back to the client
+// under the name it asked. dnsdist 1.9 cannot assign dq.qname from Lua (the setter is a
+// no-op there; QNameRewriteAction only exists in 2.x), so every rule is a pair of hooks
+// over DNSQuestion:changeName / DNSResponse:changeName (1.8+): the query hook rewrites
+// the question to the target and remembers the original in a tag (tags travel to the
+// response); the response hook matches the **target** (the response's qname after the
+// rewrite) and rebases the question and every record owner under it back to the original
+// name, so the client never sees the target. ponytail: one rewrite level — a target whose
+// answer chains through other CNAMEs keeps those owners; keep targets direct (A/AAAA) for
+// a fully flattened answer.
+func renderCNames(nc api.CNames) ([]byte, error) {
+	var s strings.Builder
+	s.WriteString(Header)
+	for i, r := range nc.Rules {
+		name := strings.ToLower(strings.TrimSuffix(r.Name, "."))
+		target := strings.ToLower(strings.TrimSuffix(r.Target, "."))
+		fmt.Fprintf(&s, `-- cname %s -> %s (smartdns cname /domain/target, SPEC §6.11)
+local smn%d = newSuffixMatchNode()
+smn%d:add(newDNSName(%s))
+addAction(SuffixMatchNodeRule(smn%d, true), LuaAction(function(dq)
+  if not dq:changeName(newDNSName(%s)) then return DNSAction.None end
+  dq:setTag("cname-origin", %s)
+  return DNSAction.None
+end), {name = "dnsjos-cname-%d"})
+local tsmn%d = newSuffixMatchNode()
+tsmn%d:add(newDNSName(%s))
+addResponseAction(SuffixMatchNodeRule(tsmn%d, true), LuaResponseAction(function(dr)
+  local origin = dr:getTag("cname-origin")
+  if not origin or origin == "" then return DNSResponseAction.None end
+  dr:changeName(newDNSName(origin))
+  return DNSResponseAction.None
+end), {name = "dnsjos-cname-%d-back"})
+`, luaString(name), luaString(target), i, i, luaString(name), i, luaString(target), luaString(name), i, i, i, luaString(target), i, i)
+	}
+	return []byte(s.String()), nil
+}
+
 // renderFastestIP is smartdns' answer after its speed test (SPEC §6.9): the fastest
 // address first, then the others that are nearly as fast (_dns_rrs_add_all_best_ip), at
 // most max addresses, a CNAME chain flattened to one CNAME to the final name.
+// AnswerMode "fastest-response" (smartdist's SPEEDCHECK_MODE) instead overwrites the
+// whole answer with the Top MaxResponse measured addresses, round-robin (§6.11).
 func renderFastestIP(sc api.SpeedCheck, rt api.NodeRuntime) []byte {
 	var s strings.Builder
 	s.WriteString(Header)
@@ -588,10 +628,13 @@ func renderFastestIP(sc api.SpeedCheck, rt api.NodeRuntime) []byte {
 -- Answers of listed names are rebuilt like smartdns' cached answer.
 local LIST_FILE = %s
 local MAX_IPS = %d
+local MODE = %q
+local TOP_N = %d
 
 declareMetric("fastest-ip-rewrites", "counter", "A/AAAA answers rebuilt with the fastest addresses")
 declareMetric("fastest-ip-names", "gauge", "Names with measured address speeds")
-`, luaString(path.Join(rt.BaseDir, FileFastestIPList)), cmp.Or(sc.MaxReplyIPNum, 8))
+`, luaString(path.Join(rt.BaseDir, FileFastestIPList)), cmp.Or(sc.MaxReplyIPNum, 8),
+		cmp.Or(sc.AnswerMode, api.AnswerModeFastestIP), cmp.Or(sc.MaxResponse, 2))
 	s.WriteString(readListLua)
 	s.WriteString(parse6Lua)
 	s.WriteString(skipNameLua)
@@ -711,22 +754,59 @@ local function fastestIP(dr)
   local m = times[name]
   if not m then return DNSResponseAction.None, "" end
 
-  -- smartdns' _dns_rrs_add_all_best_ip: the fastest first; another address only when it
-  -- answered and is < 5 ms slower, within 10 % + 0.5 ms, or itself < 10 ms.
-  local best
-  for i, a in ipairs(addrs) do
+  -- Measured addresses, fastest first (the list the modes below work from).
+  local ranked = {}
+  for _, a in ipairs(addrs) do
     local v = m[a]
-    if v and v >= 0 and (not best or v < m[addrs[best]]) then best = i end
+    if v and v >= 0 then ranked[#ranked + 1] = { a, v } end
   end
-  if not best then return DNSResponseAction.None, "" end
-  local b = m[addrs[best]]
-  local pick = { addrs[best] }
-  for i, a in ipairs(addrs) do
-    if #pick >= MAX_IPS then break end
-    local v = m[a]
-    if i ~= best and v and v >= 0 and not (v - b >= 50 and b + math.floor(b / 10) + 5 < v and v >= 100) then
-      pick[#pick + 1] = a
+  table.sort(ranked, function(x, y) return x[2] < y[2] end)
+  if #ranked == 0 then return DNSResponseAction.None, "" end
+
+  local pick
+  if MODE == "fastest-response" then
+    -- smartdist's fastest-response: the whole answer becomes the Top TOP_N measured
+    -- addresses (round-robin per answer). Addresses never measured mean "unknown", not
+    -- "slow": when too few were measured, leave the answer alone.
+    if #ranked < math.min(TOP_N, #addrs) then return DNSResponseAction.None, "" end
+    pick = {}
+    for i = 1, math.min(TOP_N, #ranked) do pick[i] = ranked[i][1] end
+  else
+    -- smartdns' _dns_rrs_add_all_best_ip: the fastest first; another address only when it
+    -- answered and is < 5 ms slower, within 10 % + 0.5 ms, or itself < 10 ms.
+    local b = ranked[1][2]
+    pick = { ranked[1][1] }
+    for _, r in ipairs(ranked) do
+      local a, v = r[1], r[2]
+      if #pick >= MAX_IPS then break end
+      if a ~= pick[1] and not (v - b >= 50 and b + math.floor(b / 10) + 5 < v and v >= 100) then
+        pick[#pick + 1] = a
+      end
     end
+  end
+
+  if MODE == "fastest-response" then
+    -- Overwrite every address record of the answer with the top picks, round-robin
+    -- (smartdist's fastest-response): owners, CNAMEs, TTLs, authority and OPT all stay.
+    local k, walk, last, parts = 0, pos, 1, {}
+    for _ = 1, an do
+      local q = skipName(p, walk)
+      if not q or q + 9 > #p then return DNSResponseAction.None, "" end
+      local rl = at16(p, q + 8)
+      local rd = q + 10
+      if rd + rl - 1 > #p then return DNSResponseAction.None, "" end
+      if at16(p, q) == want and rl == rdlen then
+        k = k + 1
+        parts[#parts + 1] = p:sub(last, rd - 1)
+        parts[#parts + 1] = pick[(k - 1) % #pick + 1]
+        last = rd + rl
+      end
+      walk = rd + rl
+    end
+    parts[#parts + 1] = p:sub(last)
+    dr:setContent(table.concat(parts))
+    incMetric("fastest-ip-rewrites")
+    return DNSResponseAction.None, ""
   end
 
   -- keep only the EDNS OPT record of the additional section
