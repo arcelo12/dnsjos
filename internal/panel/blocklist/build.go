@@ -68,6 +68,10 @@ type source struct {
 func isURLKind(k string) bool {
 	return strings.HasPrefix(k, "trustpositif_") || strings.HasPrefix(k, "url_")
 }
+
+// isRPZDomainsKind is the kind the RPZ slave fills from AXFR/IXFR transfers. It is NOT a
+// URL source: its content is the transferred domain list, written by the sync job.
+func isRPZDomainsKind(k string) bool { return k == api.SourceRPZDomains }
 func isDomainKind(k string) bool { return strings.HasSuffix(k, "_domains") }
 func isIPKind(k string) bool     { return strings.HasSuffix(k, "_ips") }
 
