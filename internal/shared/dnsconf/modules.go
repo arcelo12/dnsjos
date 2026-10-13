@@ -897,16 +897,18 @@ func renderIPAliasRule(idx int, r api.IPAliasRule) string {
       scan = rd + rl
     end
     if #hits == 0 then return DNSResponseAction.None, "" end
-    -- Pass 2: overwrite each matching address in place, cycling through the targets.
-    local bytes = { p:byte(1, #p) }
-    local nt = #ipa%d.targets
+    -- Pass 2: rebuild from slices instead of expanding p:byte(1, #p). LuaJIT limits the
+    -- number of return values from one call, so byte-expanding large TCP/DoH answers
+    -- fails above roughly 8 KB. Hits are discovered in wire order, so slices stay ordered.
+    local out, last, nt = {}, 1, #ipa%d.targets
     for _, rd in ipairs(hits) do
+      out[#out + 1] = p:sub(last, rd - 1)
       local tb = ipa%d.targets[(ipa%d.rr %% nt) + 1]
       ipa%d.rr = ipa%d.rr + 1
-      for i = 0, ipa%d.rdlen - 1 do bytes[rd + i] = tb:byte(i + 1) end
+      out[#out + 1] = tb
+      last = rd + ipa%d.rdlen
     end
-    local out = {}
-    for i = 1, #bytes do out[i] = string.char(bytes[i]) end
+    out[#out + 1] = p:sub(last)
     dr:setContent(table.concat(out))
     -- The rewritten answer must not be packet-cached, or the cache would freeze the
     -- first rotation step; the TagRule + SetSkipCacheResponseAction below reads this tag.
