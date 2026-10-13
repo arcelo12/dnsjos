@@ -385,8 +385,8 @@ func TestLiveCName(t *testing.T) {
 	if len(r.Answer) != 1 {
 		t.Fatalf("sub.mir: %v", r.Answer)
 	}
-	if a := r.Answer[0].(*dns.A); a.A.String() != "198.51.100.7" {
-		t.Errorf("sub.mir: want A 198.51.100.7, got %v", r.Answer)
+	if a := r.Answer[0].(*dns.A); a.A.String() != "198.51.100.7" || a.Hdr.Name != "sub.mir.example." || r.Question[0].Name != "sub.mir.example." {
+		t.Errorf("sub.mir: want question/owner sub.mir.example. A 198.51.100.7, got question %q answer %v", r.Question[0].Name, r.Answer)
 	}
 	if r := d.query("other.example.", dns.TypeA); len(r.Answer) != 1 || r.Answer[0].(*dns.A).A.String() != "198.51.100.9" {
 		t.Errorf("other (unmapped): %v", r.Answer)

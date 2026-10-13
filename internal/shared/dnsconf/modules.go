@@ -597,8 +597,9 @@ func renderCNames(nc api.CNames) ([]byte, error) {
 local smn%d = newSuffixMatchNode()
 smn%d:add(newDNSName(%s))
 addAction(SuffixMatchNodeRule(smn%d, true), LuaAction(function(dq)
+  local orig = dq.qname:toString()
   if not dq:changeName(newDNSName(%s)) then return DNSAction.None end
-  dq:setTag("cname-origin", %s)
+  dq:setTag("cname-origin", orig)
   return DNSAction.None
 end), {name = "dnsjos-cname-%d"})
 local tsmn%d = newSuffixMatchNode()
@@ -609,7 +610,7 @@ addResponseAction(SuffixMatchNodeRule(tsmn%d, true), LuaResponseAction(function(
   dr:changeName(newDNSName(origin))
   return DNSResponseAction.None
 end), {name = "dnsjos-cname-%d-back"})
-`, luaString(name), luaString(target), i, i, luaString(name), i, luaString(target), luaString(name), i, i, i, luaString(target), i, i)
+`, luaString(name), luaString(target), i, i, luaString(name), i, luaString(target), i, i, i, luaString(target), i, i)
 	}
 	return []byte(s.String()), nil
 }
