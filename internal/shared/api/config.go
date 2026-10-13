@@ -18,6 +18,7 @@ type ConfigSpec struct {
 	Abuse      Abuse      `json:"abuse"`
 	CGK        CGK        `json:"cgk"`
 	SpeedCheck SpeedCheck `json:"speed_check"`
+	CName      CNames     `json:"cname"`
 	DualStack  DualStack  `json:"dualstack"`
 	DNSSEC     DNSSEC     `json:"dnssec"`
 	Tuning     Tuning     `json:"tuning"`
@@ -114,6 +115,23 @@ type CGK struct {
 	RefreshIntervalH int      `json:"refresh_interval_h"`
 }
 
+// CNames maps names (and their subdomains) to another name, smartdns'
+// `cname /domain/target` (SPEC §6.11): the query is resolved under the target and the
+// answer goes back to the client under the name it asked (dnsdist restores the original
+// question; the records reference the question by pointer).
+type CNames struct {
+	Enabled bool        `json:"enabled"`
+	Rules   []CNameRule `json:"rules"`
+}
+
+// CNameRule resolves every query for Name (with subdomains) as Target instead.
+type CNameRule struct {
+	// Name asked by clients (cname /domain/target's domain).
+	Name string `json:"name"`
+	// Target resolved by the upstreams; its answer is returned for Name.
+	Target string `json:"target"`
+}
+
 // DualStack answers AAAA queries empty (NODATA + SOA) for names whose IPv4 address is
 // measurably faster from this node than their IPv6 one, so dual-stack clients connect over
 // IPv4: smartdns' dualstack-ip-selection (SPEC §6.8). Only right on nodes that share their
@@ -149,12 +167,29 @@ type SpeedCheck struct {
 	Mode string `json:"mode"`
 	// Answer with the fastest address first plus the ones nearly as fast (smartdns).
 	FastestIP bool `json:"fastest_ip"`
+	// How the measured speeds shape the answer (smartdns' response modes; only
+	// fastest-ip is the default, SPEC §6.9):
+	//
+	//	"" or "fastest-ip": reorder, fastest first, add the multi-upstream
+	//	aggregation addresses the answer is missing (capped at MaxResponse).
+	//	"fastest-response": overwrite every address with the Top MaxResponse round-robin
+	//	(smartdist's SPEEDCHECK_MODE fastest-response).
+	AnswerMode string `json:"answer_mode"`
 	// At most this many addresses per answer (max-reply-ip-num; 0 = 8).
 	MaxReplyIPNum int `json:"max_reply_ip_num"`
+	// Top this many measured addresses per answer in fastest-response mode
+	// (smartdist's SPEEDCHECK_MAX_RESPONSE; 0 = 2).
+	MaxResponse int `json:"max_response"`
 	// Names (and their subdomains) whose answers are never reordered
 	// (domain-rules -speed-check-mode none).
 	Exclude []string `json:"exclude"`
 }
+
+// Answer modes of SpeedCheck.AnswerMode.
+const (
+	AnswerModeFastestIP       = "fastest-ip"
+	AnswerModeFastestResponse = "fastest-response"
+)
 
 // DefaultSpeedCheckMode is smartdns' default speed-check-mode.
 const DefaultSpeedCheckMode = "ping,tcp:80,tcp:443"
@@ -276,7 +311,7 @@ func DefaultConfigSpec() ConfigSpec {
 			},
 			AliasesWanted: 8, MinOK: 3, RefreshIntervalH: 6,
 		},
-		SpeedCheck: SpeedCheck{Mode: DefaultSpeedCheckMode, MaxReplyIPNum: 8, Exclude: []string{}}, // fastest_ip opt-in
+		SpeedCheck: SpeedCheck{Mode: DefaultSpeedCheckMode, AnswerMode: AnswerModeFastestIP, MaxReplyIPNum: 8, Exclude: []string{}}, // fastest_ip opt-in
 		DualStack:  DualStack{ThresholdMs: 10, Exclude: []string{}},                                // opt-in: see DualStack
 		DNSSEC:     DNSSEC{Exclude: []string{}},
 		Tuning:     Tuning{UDPBufferBytes: 16777216},

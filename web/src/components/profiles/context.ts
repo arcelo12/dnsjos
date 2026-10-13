@@ -30,6 +30,7 @@ export const TABS = [
   { id: 'abuse', label: 'Abuse', keys: ['abuse'] },
   { id: 'cgk', label: 'CGK', keys: ['cgk'] },
   { id: 'speed_check', label: 'Speed check', keys: ['speed_check'] },
+  { id: 'cname', label: 'CNAME', keys: ['cname'] },
   { id: 'dualstack', label: 'Dual-stack', keys: ['dualstack'] },
   { id: 'dnssec', label: 'DNSSEC', keys: ['dnssec'] },
   { id: 'analytics', label: 'Analytics', keys: ['analytics'] },

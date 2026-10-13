@@ -73,6 +73,8 @@ dofile("/etc/dnsdist/dnsjos/fastest-ip.lua")
 -- Answers of listed names are rebuilt like smartdns' cached answer.
 local LIST_FILE = "/etc/dnsdist/dnsjos/fastest-ip.txt"
 local MAX_IPS = 4
+local MODE = "fastest-ip"
+local TOP_N = 2
 
 declareMetric("fastest-ip-rewrites", "counter", "A/AAAA answers rebuilt with the fastest addresses")
 declareMetric("fastest-ip-names", "gauge", "Names with measured address speeds")
@@ -241,22 +243,59 @@ local function fastestIP(dr)
   local m = times[name]
   if not m then return DNSResponseAction.None, "" end
 
-  -- smartdns' _dns_rrs_add_all_best_ip: the fastest first; another address only when it
-  -- answered and is < 5 ms slower, within 10 % + 0.5 ms, or itself < 10 ms.
-  local best
-  for i, a in ipairs(addrs) do
+  -- Measured addresses, fastest first (the list the modes below work from).
+  local ranked = {}
+  for _, a in ipairs(addrs) do
     local v = m[a]
-    if v and v >= 0 and (not best or v < m[addrs[best]]) then best = i end
+    if v and v >= 0 then ranked[#ranked + 1] = { a, v } end
   end
-  if not best then return DNSResponseAction.None, "" end
-  local b = m[addrs[best]]
-  local pick = { addrs[best] }
-  for i, a in ipairs(addrs) do
-    if #pick >= MAX_IPS then break end
-    local v = m[a]
-    if i ~= best and v and v >= 0 and not (v - b >= 50 and b + math.floor(b / 10) + 5 < v and v >= 100) then
-      pick[#pick + 1] = a
+  table.sort(ranked, function(x, y) return x[2] < y[2] end)
+  if #ranked == 0 then return DNSResponseAction.None, "" end
+
+  local pick
+  if MODE == "fastest-response" then
+    -- smartdist's fastest-response: the whole answer becomes the Top TOP_N measured
+    -- addresses (round-robin per answer). Addresses never measured mean "unknown", not
+    -- "slow": when too few were measured, leave the answer alone.
+    if #ranked < math.min(TOP_N, #addrs) then return DNSResponseAction.None, "" end
+    pick = {}
+    for i = 1, math.min(TOP_N, #ranked) do pick[i] = ranked[i][1] end
+  else
+    -- smartdns' _dns_rrs_add_all_best_ip: the fastest first; another address only when it
+    -- answered and is < 5 ms slower, within 10 % + 0.5 ms, or itself < 10 ms.
+    local b = ranked[1][2]
+    pick = { ranked[1][1] }
+    for _, r in ipairs(ranked) do
+      local a, v = r[1], r[2]
+      if #pick >= MAX_IPS then break end
+      if a ~= pick[1] and not (v - b >= 50 and b + math.floor(b / 10) + 5 < v and v >= 100) then
+        pick[#pick + 1] = a
+      end
     end
+  end
+
+  if MODE == "fastest-response" then
+    -- Overwrite every address record of the answer with the top picks, round-robin
+    -- (smartdist's fastest-response): owners, CNAMEs, TTLs, authority and OPT all stay.
+    local k, walk, last, parts = 0, pos, 1, {}
+    for _ = 1, an do
+      local q = skipName(p, walk)
+      if not q or q + 9 > #p then return DNSResponseAction.None, "" end
+      local rl = at16(p, q + 8)
+      local rd = q + 10
+      if rd + rl - 1 > #p then return DNSResponseAction.None, "" end
+      if at16(p, q) == want and rl == rdlen then
+        k = k + 1
+        parts[#parts + 1] = p:sub(last, rd - 1)
+        parts[#parts + 1] = pick[(k - 1) % #pick + 1]
+        last = rd + rl
+      end
+      walk = rd + rl
+    end
+    parts[#parts + 1] = p:sub(last)
+    dr:setContent(table.concat(parts))
+    incMetric("fastest-ip-rewrites")
+    return DNSResponseAction.None, ""
   end
 
   -- keep only the EDNS OPT record of the additional section

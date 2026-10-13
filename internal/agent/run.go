@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 
@@ -826,8 +827,8 @@ func (a *agent) dualStack(ctx context.Context, st dualstack.State) {
 	v4, v6 := []dualstack.Item{}, []dualstack.Item{}
 	ready := speedcheck.IPv6Ready()
 	if ready { // no IPv6 route here: every name would look IPv4-only (smartdns turns the feature off too)
-		// Resolve through the node's own first upstream: the answers its clients get.
-		p := speedcheck.NetProber{Resolver: spec.Upstreams.Servers[0].Address}
+		// Resolve through the node's own upstreams, first one first: the answers its clients get.
+		p := speedcheck.NetProber{Resolvers: resolverAddrs(spec)}
 		dualstack.Update(ctx, p, st, seen, pr, now)
 		if ctx.Err() != nil {
 			return
@@ -853,7 +854,7 @@ func (a *agent) fastestIP(ctx context.Context, st speedcheck.State) {
 	}
 	now := time.Now().UTC()
 	methods, _ := api.ParseSpeedCheckMode(spec.SpeedCheck.Mode)
-	p := speedcheck.NetProber{Resolver: spec.Upstreams.Servers[0].Address}
+	p := speedcheck.NetProber{Resolvers: resolverAddrs(spec)}
 	speedcheck.Update(ctx, p, st, seen, methods, speedcheck.Names(spec.SpeedCheck.Exclude), speedcheck.IPv6Ready(), now)
 	if ctx.Err() != nil {
 		return
@@ -867,6 +868,58 @@ func (a *agent) fastestIP(ctx context.Context, st speedcheck.State) {
 	case out != "":
 		a.o.Log.Info("fastest-ip list updated", "names", len(lines), "measured", st.Checked(), "dnsdist", out)
 	}
+	a.postSpeedCheck(ctx, st, now)
+}
+
+// postSpeedCheck reports the measured names to the panel (node page, SPEC §6.9).
+func (a *agent) postSpeedCheck(ctx context.Context, st speedcheck.State, now time.Time) {
+	ms := func(d time.Duration) float64 {
+		if d < 0 {
+			return -1
+		}
+		return float64(d.Microseconds()) / 1000
+	}
+	rep := api.SpeedCheckReport{Names: []api.SpeedCheckName{}, Checked: st.Checked(), At: now}
+	for n, e := range st {
+		if e.CheckedAt.IsZero() {
+			continue
+		}
+		top, ms_top := "", -1.0
+		if f := speedcheck.Fastest(e.Times); f >= 0 {
+			for ip, d := range e.Times {
+				if d == f {
+					top, ms_top = ip, ms(f)
+					break
+				}
+			}
+		}
+		rep.Names = append(rep.Names, api.SpeedCheckName{Name: n, Hits: e.Hits, TopIP: top, TopMs: ms_top,
+			Addresses: len(e.Times), CheckedAt: e.CheckedAt})
+	}
+	sort.Slice(rep.Names, func(i, j int) bool {
+		if rep.Names[i].Hits != rep.Names[j].Hits {
+			return rep.Names[i].Hits > rep.Names[j].Hits
+		}
+		return rep.Names[i].Name < rep.Names[j].Name
+	})
+	if len(rep.Names) > 512 { // the node page shows the busiest; keep the payload bounded
+		rep.Names = rep.Names[:512]
+	}
+	if err := a.cl.PostSpeedCheck(ctx, rep); err != nil && ctx.Err() == nil {
+		a.o.Log.Debug("speed check: reporting to the panel failed", "err", err)
+	}
+}
+
+// resolverAddrs lists the spec's upstream addresses in preference order (first = the one
+// the node's clients get their answers from).
+func resolverAddrs(spec api.ConfigSpec) []string {
+	out := make([]string, 0, len(spec.Upstreams.Servers))
+	for _, s := range spec.Upstreams.Servers {
+		if ap, err := netip.ParseAddrPort(s.Address); err == nil {
+			out = append(out, ap.String())
+		}
+	}
+	return out
 }
 
 // postDualStack reports the listed names to the panel (node page, SPEC §6.8).
