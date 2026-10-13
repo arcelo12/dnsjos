@@ -42,14 +42,12 @@ type liveDnsdist struct {
 
 // startDnsdist runs the rendered config (blocking + response IPs, CDB: blocked.example
 // and 192.0.2.1) in a real dnsdist against a backend answering the A records in ips;
-// it skips when dnsdist is not on PATH.
-func startDnsdist(t *testing.T, ips map[string][]string) *liveDnsdist {
-	return startDnsdistMut(t, ips, nil)
+// it skips when dnsdist is not on PATH; mut adjusts the default spec before rendering.
+func startDnsdist(t *testing.T, ips map[string][]string, mut ...func(*api.ConfigSpec)) *liveDnsdist {
+	return startDnsdistMut(t, ips, mut...)
 }
 
-// startDnsdistMut is startDnsdist with a final chance to adjust the spec (e.g. enable
-// ip-alias with a rule for the test).
-func startDnsdistMut(t *testing.T, ips map[string][]string, mutate func(*api.ConfigSpec)) *liveDnsdist {
+func startDnsdistMut(t *testing.T, ips map[string][]string, mut ...func(*api.ConfigSpec)) *liveDnsdist {
 	bin, err := exec.LookPath("dnsdist")
 	if err != nil {
 		t.Skip("dnsdist not on PATH")
@@ -110,8 +108,8 @@ func startDnsdistMut(t *testing.T, ips map[string][]string, mutate func(*api.Con
 	spec.DualStack.Enabled = true
 	spec.SpeedCheck.FastestIP = true
 	spec.Analytics.StreamAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t)) // nobody listens; fine
-	if mutate != nil {
-		mutate(&spec)
+	for _, m := range mut {
+		m(&spec)
 	}
 	rt := testRT
 	rt.BaseDir, rt.CDBPath = d.dir, cdbPath
@@ -148,11 +146,19 @@ func startDnsdistMut(t *testing.T, ips map[string][]string, mutate func(*api.Con
 		return nil
 	}
 	d.console = func(command string) string {
-		out, err := exec.Command(bin, "-C", d.conf, "-c", "-e", command).CombinedOutput()
-		if err != nil {
-			t.Fatalf("console %s: %v: %s", command, err, out)
+		// The console socket accepts connections a moment after start: retry briefly instead
+		// of failing the test on the startup race.
+		var out []byte
+		var err error
+		for range 50 {
+			out, err = exec.Command(bin, "-C", d.conf, "-c", "-e", command).CombinedOutput()
+			if err == nil {
+				return string(out)
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		return string(out)
+		t.Fatalf("console %s: %v: %s", command, err, out)
+		return ""
 	}
 	return d
 }

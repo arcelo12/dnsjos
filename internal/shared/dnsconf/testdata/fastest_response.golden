@@ -277,7 +277,8 @@ local function fastestIP(dr)
   if MODE == "fastest-response" then
     -- Overwrite every address record of the answer with the top picks, round-robin
     -- (smartdist's fastest-response): owners, CNAMEs, TTLs, authority and OPT all stay.
-    local k, walk, last, parts = 0, pos, 1, {}
+    -- Walk from qend: the collection loop above left pos at the end of the answer section.
+    local k, walk, last, parts = 0, qend, 1, {}
     for _ = 1, an do
       local q = skipName(p, walk)
       if not q or q + 9 > #p then return DNSResponseAction.None, "" end
