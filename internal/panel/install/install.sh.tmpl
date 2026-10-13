@@ -1,7 +1,7 @@
 #!/bin/sh
 # DnsJos node installer (SPEC §13), served by the panel at /install.sh.
 #   curl -fsSL {{.PanelURL}}/install.sh | sudo sh -s -- --token TOKEN [--panel URL] [--adopt] [--no-start]
-#     [--with-unbound | --with-recursor] [--with-ecs]
+#     [--with-unbound | --with-recursor] [--with-ecs [--ecs-zones LIST]]
 # Idempotent: safe to re-run. Supports Debian 12/13 and Ubuntu 22.04/24.04 on amd64/arm64.
 set -eu
 
@@ -16,6 +16,10 @@ WITH_ECS=0
 RESOLVER_IP='127.0.0.1'
 RESOLVER_PORT=5335
 REC_SERIES='54' # PowerDNS Recursor 5.4.x from repo.powerdns.com (rec-55 is still alpha)
+# With --with-ecs the client subnet (/24, /56; never private or CGNAT ranges, dnsdist strips
+# those) goes to every authoritative server, as public resolvers do. --ecs-zones LIST limits
+# it to the name servers of those zones (e.g. CDNs only).
+ECS_ZONES='all'
 DNSDIST_SERIES='20' # dnsdist 2.0.x from repo.powerdns.com
 AGENT_BIN=/usr/local/bin/dnsjos-agent
 AGENT_CONF=/etc/dnsjos/agent.json
@@ -28,7 +32,7 @@ die() { printf 'dnsjos-install: error: %s\n' "$*" >&2; exit 1; }
 usage() {
 	cat <<EOF
 usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start]
-                  [--with-unbound | --with-recursor] [--with-ecs]
+                  [--with-unbound | --with-recursor] [--with-ecs [--ecs-zones LIST]]
   --token TOKEN  enrollment token from the panel (Nodes -> Add node)
   --panel URL    panel URL (default: $PANEL_URL)
   --adopt        take over a live dnsdist server: keep its dnsdist package, secrets,
@@ -39,6 +43,8 @@ usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start]
   --with-recursor the same with PowerDNS Recursor (repo.powerdns.com, same vendor as dnsdist)
   --with-ecs      let the local resolver pass EDNS Client Subnet from dnsdist on to
                   authoritative servers (also turn ECS on for 127.0.0.1:5335 in the profile)
+  --ecs-zones LIST  only send it for these zones (comma or space separated domains);
+                  default: all authoritative servers
 EOF
 }
 
@@ -53,6 +59,8 @@ while [ $# -gt 0 ]; do
 		--with-unbound) WITH_UNBOUND=1; shift ;;
 		--with-recursor) WITH_RECURSOR=1; shift ;;
 		--with-ecs) WITH_ECS=1; shift ;;
+		--ecs-zones) [ $# -ge 2 ] || die "--ecs-zones needs a value"; ECS_ZONES=$2; shift 2 ;;
+		--ecs-zones=*) ECS_ZONES=${1#--ecs-zones=}; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage >&2; die "unknown argument: $1" ;;
 	esac
@@ -64,6 +72,11 @@ PANEL_URL=${PANEL_URL%/}
 case "$PANEL_URL" in http://*|https://*) ;; *) die "--panel must be an http(s) URL" ;; esac
 [ "$WITH_UNBOUND$WITH_RECURSOR" != 11 ] || die "--with-unbound and --with-recursor both listen on $RESOLVER_IP:$RESOLVER_PORT: pick one"
 [ "$WITH_ECS" = 0 ] || [ "$WITH_UNBOUND$WITH_RECURSOR" != 00 ] || die "--with-ecs needs --with-unbound or --with-recursor"
+ECS_ZONES=$(printf '%s\n' "$ECS_ZONES" | tr ', ' '\n\n' | sed 's/\.$//' | grep . | sort -u)
+[ "$ECS_ZONES" != all ] || ECS_ZONES=''
+for z in $ECS_ZONES; do
+	printf '%s\n' "$z" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]{0,252})$' || die "--ecs-zones: '$z' is not a domain name"
+done
 
 # ── 1. OS / architecture ────────────────────────────────────────────────────
 [ -r /etc/os-release ] || die "cannot read /etc/os-release"
@@ -281,15 +294,20 @@ if [ "$WITH_UNBOUND" = 1 ]; then
 	while [ "$UB_SLABS" -lt "$RES_THREADS" ]; do UB_SLABS=$((UB_SLABS * 2)); done
 	UB_RRSET=$(awk '/^MemTotal:/ {m = int($2 / 1024 / 16); if (m < 64) m = 64; if (m > 1024) m = 1024; print m; exit}' /proc/meminfo)
 	UB_RRSET=${UB_RRSET:-128}
-	# ECS: dnsdist adds the client subnet; pass it to every authoritative server (the
-	# subnetcache module keeps per-subnet answers apart, scope-0 answers stay shared).
+	# ECS: pass the client subnet dnsdist adds on to authoritative servers (all, or only
+	# --ecs-zones); the subnetcache module keeps per-subnet answers apart, scope-0 ones shared.
 	UB_ECS=''
 	if [ "$WITH_ECS" = 1 ]; then
 		UB_ECS='
     # EDNS Client Subnet from dnsdist, passed on to authoritative servers
-    module-config: "subnetcache validator iterator"
+    module-config: "subnetcache validator iterator"'
+		if [ -z "$ECS_ZONES" ]; then
+			UB_ECS="$UB_ECS
     send-client-subnet: 0.0.0.0/0
-    send-client-subnet: ::0/0'
+    send-client-subnet: ::0/0"
+		fi
+		for z in $ECS_ZONES; do UB_ECS="$UB_ECS
+    client-subnet-zone: $z"; done
 	fi
 	cat >/etc/unbound/unbound.conf.d/dnsjos.conf <<EOF
 # Managed by the DnsJos installer: recursive resolver behind dnsdist, loopback only.
@@ -300,6 +318,8 @@ server:
     do-ip6: ${RES_IP6}
     hide-identity: yes
     hide-version: yes
+    # cache counts, rcodes and query types for unbound_exporter / unbound-control stats
+    extended-statistics: yes
 
     # threads and sockets
     num-threads: ${RES_THREADS}
@@ -357,15 +377,21 @@ if [ "$WITH_RECURSOR" = 1 ]; then
 	REC_SRC6=''
 	[ "$RES_IP6" = no ] || REC_SRC6="
     - '::'"
-	REC_ECS_IN='' REC_ECS_OUT=''
+	REC_ECS_IN='' REC_ECS_OUT='' REC_ECS=''
 	if [ "$WITH_ECS" = 1 ]; then
-		# Take the client subnet dnsdist adds and pass it to every authoritative server.
+		# Take the client subnet dnsdist adds and pass it on (all servers, or only --ecs-zones).
 		REC_ECS_IN='
   use_incoming_edns_subnet: true'
 		REC_ECS_OUT='
-  edns_subnet_allow_list:
-    - 0.0.0.0/0
-    - ::/0'
+  edns_subnet_allow_list:'
+		for z in ${ECS_ZONES:-0.0.0.0/0 ::/0}; do REC_ECS_OUT="$REC_ECS_OUT
+    - '$z'"; done
+		# Clients dnsdist sends with an empty /0 (private/CGNAT): send this node's address,
+		# not 127.0.0.1, so CDNs answer for the node's location as without ECS.
+		REC_PUB4=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+		[ -z "$REC_PUB4" ] || REC_ECS="
+ecs:
+  scope_zero_address: $REC_PUB4"
 	fi
 	mkdir -p /etc/powerdns/recursor.d
 	cat >/etc/powerdns/recursor.d/dnsjos.yml <<EOF
@@ -391,7 +417,7 @@ recordcache:
   refresh_on_ttl_perc: 10
   serve_stale_extensions: 2880
 packetcache:
-  max_entries: $((REC_ENTRIES / 2))
+  max_entries: $((REC_ENTRIES / 2))${REC_ECS}
 EOF
 	if ! command -v pdns_recursor >/dev/null 2>&1; then
 		REC_KEYRING=/etc/apt/keyrings/pdns-rec-pub.asc

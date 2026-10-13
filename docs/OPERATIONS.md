@@ -23,6 +23,8 @@ dnsdist keeps filtering, policies and routing. In the node's profile or override
 For nodes far from their customers (another country), add `--with-ecs` and turn **ECS** on
 for `127.0.0.1:5335` in the profile's upstreams: the resolver then passes each client's
 subnet (/24, /56) to authoritative servers, so CDNs answer for the customer's location.
+dnsdist never passes on private / CGNAT client subnets or ECS a client supplied itself.
+`--ecs-zones "googlevideo.com,akamaiedge.net,…"` limits it to those zones' name servers.
 
 The installer also tunes the kernel and NIC for DNS (`/etc/sysctl.d/91-dnsjos-tuning.conf`,
 `dnsjos-nic-tuning.service`, `/etc/tmpfiles.d/dnsjos-tuning.conf`); it never lowers a value
