@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/billyriantono/dnsjos/internal/panel/blocklist"
 	"github.com/billyriantono/dnsjos/internal/panel/db/dbtest"
 )
 
@@ -88,7 +89,7 @@ func TestCurrentBuildProfileFallback(t *testing.T) {
 	}
 }
 
-// nodeProfileID resolves a node's effective profile: its own, else the "default" profile.
+// blocklist.NodeProfileID resolves a node's effective profile: its own, else the "default" profile.
 func TestNodeProfileID(t *testing.T) {
 	pool := profileDB(t)
 	ctx := context.Background()
@@ -98,14 +99,14 @@ func TestNodeProfileID(t *testing.T) {
 	unset := mkNode(t, pool, "n-unset", "")
 	pinned := mkNode(t, pool, "n-pinned", a)
 
-	if got, err := nodeProfileID(ctx, pool, unset); err != nil || got != def {
+	if got, err := blocklist.NodeProfileID(ctx, pool, unset); err != nil || got != def {
 		t.Fatalf("unset node → %q err %v, want default %q", got, err, def)
 	}
-	if got, err := nodeProfileID(ctx, pool, pinned); err != nil || got != a {
+	if got, err := blocklist.NodeProfileID(ctx, pool, pinned); err != nil || got != a {
 		t.Fatalf("pinned node → %q err %v, want A %q", got, err, a)
 	}
 	// Unknown node: no profile, no error.
-	if got, err := nodeProfileID(ctx, pool, "00000000-0000-0000-0000-000000000000"); err != nil || got != "" {
+	if got, err := blocklist.NodeProfileID(ctx, pool, "00000000-0000-0000-0000-000000000000"); err != nil || got != "" {
 		t.Fatalf("unknown node → %q err %v, want empty", got, err)
 	}
 }

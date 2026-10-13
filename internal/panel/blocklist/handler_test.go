@@ -24,27 +24,7 @@ import (
 // the HTTP layer (the JSON contract the web client depends on).
 func newHandlerSvc(t *testing.T) (*Service, *pgxpool.Pool, func(method, path, body string, want int, out any)) {
 	t.Helper()
-	pool := dbtest.New(t, "blocklist")
-	ctx := context.Background()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	d := &app.Deps{Pool: pool, Log: log, Live: app.NewLiveStore(),
-		Settings: app.NewSettings(pool, "http://x"), Cfg: config.Config{DataDir: t.TempDir()}}
-	if err := d.Settings.Load(ctx); err != nil {
-		t.Fatal(err)
-	}
-	// The seeded TrustPositif sources point at the internet and litter the listings; drop
-	// them so a test's own sources are the only rows.
-	exec(t, pool, `DELETE FROM blocklist_sources`)
-
-	s := newService(d)
-	tok := app.NewToken()
-	exec(t, pool, `WITH u AS (INSERT INTO users (email, password_hash, role) VALUES ('h@x', 'x', 'admin') RETURNING id)
-		INSERT INTO sessions (id_hash, user_id, expires_at) SELECT $1, id, now() + interval '1 hour' FROM u`, app.HashToken(tok))
-	r := app.NewRouter(d)
-	s.routes(r)
-	srv := httptest.NewServer(r)
-	t.Cleanup(srv.Close)
-
+	s, pool, srv, tok := newHandlerServer(t)
 	call := func(method, path, body string, want int, out any) {
 		t.Helper()
 		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
@@ -65,6 +45,33 @@ func newHandlerSvc(t *testing.T) (*Service, *pgxpool.Pool, func(method, path, bo
 		}
 	}
 	return s, pool, call
+}
+
+// newHandlerServer is newHandlerSvc's setup: the service, its pool, the HTTP server and an
+// admin session token.
+func newHandlerServer(t *testing.T) (*Service, *pgxpool.Pool, *httptest.Server, string) {
+	t.Helper()
+	pool := dbtest.New(t, "blocklist")
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d := &app.Deps{Pool: pool, Log: log, Live: app.NewLiveStore(),
+		Settings: app.NewSettings(pool, "http://x"), Cfg: config.Config{DataDir: t.TempDir()}}
+	if err := d.Settings.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The seeded TrustPositif sources point at the internet and litter the listings; drop
+	// them so a test's own sources are the only rows.
+	exec(t, pool, `DELETE FROM blocklist_sources`)
+
+	s := newService(d)
+	tok := app.NewToken()
+	exec(t, pool, `WITH u AS (INSERT INTO users (email, password_hash, role) VALUES ('h@x', 'x', 'admin') RETURNING id)
+		INSERT INTO sessions (id_hash, user_id, expires_at) SELECT $1, id, now() + interval '1 hour' FROM u`, app.HashToken(tok))
+	r := app.NewRouter(d)
+	s.routes(r)
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+	return s, pool, srv, tok
 }
 
 // The builds endpoint must accept every profile_id form: absent (all scopes), empty
@@ -183,4 +190,68 @@ func TestPatchManualSourceAndMoveHTTP(t *testing.T) {
 	if src.URL != "https://example.com/other.txt" {
 		t.Fatalf("url source kept %q", src.URL)
 	}
+}
+
+// The agent download serves the node's own profile build (default profile when unset),
+// falling back to the global build. ?profile_id= with an empty value must force the global
+// build: the value alone cannot tell it from no override (it used to serve the node's own
+// profile). A profile uuid selects that profile; anything else is a 400, not a 404.
+func TestServeCDBScopeHTTP(t *testing.T) {
+	s, pool, srv, _ := newHandlerServer(t)
+	a := newProfile(t, pool, "A")
+	addSource(t, pool, "g", "manual_domains", "global.com", "")
+	addSource(t, pool, "a", "manual_domains", "a.com", a)
+	global, own := buildScope(t, s, ""), buildScope(t, s, a)
+	if global.SHA256 == own.SHA256 {
+		t.Fatal("global and profile builds must differ")
+	}
+	node := func(name, profileID string) string {
+		tok := app.NewToken()
+		exec(t, pool, `INSERT INTO nodes (name, profile_id, token_hash) VALUES ($1, nullif($2, '')::uuid, $3)`,
+			name, profileID, app.HashToken(tok))
+		return tok
+	}
+	pinned, unset := node("pinned", a), node("unset", "")
+	get := func(tok, query string, want int) string {
+		t.Helper()
+		req, _ := http.NewRequest("GET", srv.URL+"/agent/v1/blocklist"+query, nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != want {
+			t.Fatalf("GET %s: %d, want %d", query, resp.StatusCode, want)
+		}
+		return resp.Header.Get("X-Dnsjos-Sha256")
+	}
+	for _, c := range []struct {
+		name, tok, query, want string
+	}{
+		{"pinned node, no override", pinned, "", own.SHA256},
+		{"pinned node, empty override = global", pinned, "?profile_id=", global.SHA256},
+		{"unset node (default profile, no own build) falls back to global", unset, "", global.SHA256},
+		{"unset node, profile override", unset, "?profile_id=" + a, own.SHA256},
+	} {
+		if got := get(c.tok, c.query, http.StatusOK); got != c.want {
+			t.Errorf("%s: served %.12s, want %.12s", c.name, got, c.want)
+		}
+	}
+	get(pinned, "?profile_id=not-a-uuid", http.StatusBadRequest)
+}
+
+// A malformed profile_id is a 400 on every scoped read, not a failed cast mapped to 404.
+func TestProfileIDValidationHTTP(t *testing.T) {
+	_, _, call := newHandlerSvc(t)
+	for _, path := range []string{
+		"/api/v1/blocklist/sources?profile_id=junk",
+		"/api/v1/blocklist/builds?profile_id=junk",
+		"/api/v1/blocklist/current?profile_id=junk",
+		"/api/v1/blocklist/lookup?name=example.com&profile_id=junk",
+	} {
+		call("GET", path, "", http.StatusBadRequest, nil)
+	}
+	call("POST", "/api/v1/blocklist/builds?profile_id=junk", "", http.StatusBadRequest, nil)
 }
