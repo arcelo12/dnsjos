@@ -23,7 +23,7 @@ export const defaultSpec = (): ConfigSpec => ({
       up('8.8.8.8:53', 'google1', 20),
       up('8.8.4.4:53', 'google2', 20),
     ],
-    health_check_interval_s: 1, latency_floor_ms: 0,
+    health_check_interval_s: 1, latency_floor_ms: 0, ecs_prefix_v4: 0, ecs_prefix_v6: 0,
   },
   cache: { enabled: true, max_entries: 500000, min_ttl: 0, max_ttl: 86400, stale_ttl: 3600 },
   blocking: {

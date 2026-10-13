@@ -81,11 +81,11 @@ func TestBuildFlow(t *testing.T) {
 	s := newService(d)
 	build := func(want string) api.BlocklistBuild {
 		t.Helper()
-		b, err := s.insert(ctx, "manual")
+		b, err := s.insert(ctx, "manual", "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err = s.execute(ctx, b.ID, false)
+		b, err = s.execute(ctx, b.ID, "", false)
 		if b.Status != want {
 			t.Fatalf("status %s (err %v), want %s: %+v", b.Status, err, want, b)
 		}
@@ -93,7 +93,7 @@ func TestBuildFlow(t *testing.T) {
 	}
 	blocked := func(q string) bool {
 		t.Helper()
-		cur, err := Current(ctx, pool)
+		cur, err := Current(ctx, pool, "")
 		if err != nil || cur == nil {
 			t.Fatal("no current build", err)
 		}
@@ -137,11 +137,11 @@ func TestBuildFlow(t *testing.T) {
 
 	// force: full re-download (no conditional request) and a rebuild despite unchanged inputs.
 	hits, n304 := domains.hits, domains.n304
-	fb, err := s.insert(ctx, "manual")
+	fb, err := s.insert(ctx, "manual", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fb, err = s.execute(ctx, fb.ID, true); fb.Status != "ok" || domains.hits != hits+1 || domains.n304 != n304 {
+	if fb, err = s.execute(ctx, fb.ID, "", true); fb.Status != "ok" || domains.hits != hits+1 || domains.n304 != n304 {
 		t.Fatalf("forced build: %+v err %v (hits %d→%d, 304s %d→%d)", fb, err, hits, domains.hits, n304, domains.n304)
 	}
 	var st string
@@ -156,11 +156,11 @@ func TestBuildFlow(t *testing.T) {
 	}
 
 	minDomains = 10 // sanity floor: failed, previous build stays current
-	cur, _ := Current(ctx, pool)
+	cur, _ := Current(ctx, pool, "")
 	if b := build("failed"); b.Error == "" {
 		t.Fatal("floor failure without error")
 	}
-	if now, _ := Current(ctx, pool); now.ID != cur.ID {
+	if now, _ := Current(ctx, pool, ""); now.ID != cur.ID {
 		t.Fatal("failed build became current")
 	}
 	minDomains = 2
@@ -178,11 +178,11 @@ func TestBuildFlow(t *testing.T) {
 
 	// Single flight: a manual build while one runs is refused.
 	s.mu.Lock()
-	if _, err := s.Start("manual", false); err != errBusy {
+	if _, err := s.Start("manual", "", false); err != errBusy {
 		t.Fatalf("Start while busy: %v", err)
 	}
 	s.mu.Unlock()
-	b, err := s.Start("manual", false)
+	b, err := s.Start("manual", "", false)
 	if err != nil || b.Status != "running" {
 		t.Fatalf("Start: %+v %v", b, err)
 	}
@@ -218,7 +218,7 @@ func testServeCDB(t *testing.T, d *app.Deps, s *Service) {
 	s.routes(r)
 	srv := httptest.NewServer(r)
 	defer srv.Close()
-	cur, _ := Current(ctx, d.Pool)
+	cur, _ := Current(ctx, d.Pool, "")
 
 	get := func(hdr map[string]string) *http.Response {
 		req, _ := http.NewRequest("GET", srv.URL+"/agent/v1/blocklist", nil)

@@ -249,6 +249,8 @@ type BlocklistSource struct {
 	URL          string     `json:"url"`
 	Content      string     `json:"content"`
 	Enabled      bool       `json:"enabled"`
+	ProfileID    string     `json:"profile_id"` // "" = global (shared by every profile)
+	ProfileName  string     `json:"profile_name"`
 	ETag         string     `json:"etag"`
 	LastModified string     `json:"last_modified"`
 	LastFetchAt  *time.Time `json:"last_fetch_at"`
@@ -264,6 +266,8 @@ type BlocklistSourceCreate struct {
 	URL     string `json:"url"`
 	Content string `json:"content"`
 	Enabled *bool  `json:"enabled,omitempty"`
+	// ProfileID scopes the source to one profile; empty keeps it global.
+	ProfileID string `json:"profile_id,omitempty"`
 }
 
 type BlocklistSourcePatch struct {
@@ -271,10 +275,15 @@ type BlocklistSourcePatch struct {
 	URL     *string `json:"url,omitempty"`
 	Content *string `json:"content,omitempty"`
 	Enabled *bool   `json:"enabled,omitempty"`
+	// ProfileID moves the source between profiles; "" is ambiguous with "unset", so a
+	// patch cannot clear it. Empty/null leaves the profile unchanged.
+	ProfileID *string `json:"profile_id,omitempty"`
 }
 
 type BlocklistBuild struct {
 	ID          int64      `json:"id"`
+	ProfileID   string     `json:"profile_id"` // "" = the global build
+	ProfileName string     `json:"profile_name"`
 	StartedAt   time.Time  `json:"started_at"`
 	FinishedAt  *time.Time `json:"finished_at"`
 	Status      string     `json:"status"` // running | ok | failed | skipped
@@ -288,6 +297,18 @@ type BlocklistBuild struct {
 	Error       string     `json:"error"`
 	Added       int        `json:"added"`   // entries new since the previous ok build
 	Removed     int        `json:"removed"` // entries gone since the previous ok build
+}
+
+// BlocklistProfile is one config profile as seen from the blocklist page: whether it has its
+// own sources and build, or falls back to the global blocklist (SPEC §7.1).
+type BlocklistProfile struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	SourceCount    int             `json:"source_count"`
+	OwnBuild       *BlocklistBuild `json:"own_build"`       // newest ok build of this profile, or null
+	EffectiveBuild *BlocklistBuild `json:"effective_build"` // what its nodes run: own, else global
+	UsesGlobal     bool            `json:"uses_global"`     // true when it has no own build
 }
 
 type BlocklistLookup struct {

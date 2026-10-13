@@ -63,7 +63,7 @@ func (s *svc) config(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusNotFound, "no_config", "the node's profile has no published version")
 		return
 	}
-	sha, size, err := currentBuild(ctx, s.d.Pool)
+	sha, size, err := currentBuildForNode(ctx, s.d.Pool, app.NodeIDFrom(ctx))
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
@@ -303,7 +303,7 @@ func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			ack.ConfigVersion = e.version
 		}
-		if ack.BlocklistSHA256, _, err = currentBuild(ctx, tx); err != nil {
+		if ack.BlocklistSHA256, _, err = currentBuildForNode(ctx, tx, id); err != nil {
 			return err
 		}
 		al, err := blocklist.ActiveAllowlist(ctx, tx)

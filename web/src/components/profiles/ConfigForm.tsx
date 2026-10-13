@@ -88,6 +88,11 @@ export function ConfigForm({
             what="ip:port"
             placeholder="0.0.0.0:53 [::]:53"
           />
+          {do53.enabled && do53.addresses.length > 0 && do53.addresses.every((a) => a.startsWith('[')) && (
+            <p className="flex items-center gap-1.5 text-sm text-destructive">
+              <LuTriangleAlert className="size-4 shrink-0" /> No IPv4 address: IPv4 clients would get no answer. Add 0.0.0.0:53.
+            </p>
+          )}
           <NumField
             className="max-w-xs"
             label="Listeners per address"

@@ -17,6 +17,19 @@ import { fmtDateTime } from '@/lib/format'
 
 const DEFAULT_PROFILE = '__default'
 
+/** Local recursive resolver the installer can add on 127.0.0.1:5335 (install.sh flags). */
+const RESOLVERS = [
+  { id: 'none', label: 'None', flag: '', help: 'dnsdist forwards to the profile upstreams (e.g. public resolvers).' },
+  { id: 'unbound', label: 'Unbound', flag: ' --with-unbound', help: 'Light and simple; distro package.' },
+  {
+    id: 'recursor',
+    label: 'PowerDNS Recursor',
+    flag: ' --with-recursor',
+    help: 'Same vendor and repo as dnsdist, finer ECS control; best for nodes far from customers.',
+  },
+] as const
+type Resolver = (typeof RESOLVERS)[number]['id']
+
 /** "key=value" per line (or comma separated) → Labels; returns an error string on bad input. */
 function parseLabels(text: string): Labels | string {
   const out: Labels = {}
@@ -37,7 +50,8 @@ export function AddNodeDialog() {
   const [ttl, setTtl] = useState('24')
   const [labels, setLabels] = useState('')
   const [created, setCreated] = useState<EnrollmentTokenCreated>()
-  const [withUnbound, setWithUnbound] = useState(false)
+  const [resolver, setResolver] = useState<Resolver>('none')
+  const [withECS, setWithECS] = useState(false)
   const profiles = useProfiles()
   const create = useCreateEnrollmentToken()
 
@@ -49,7 +63,8 @@ export function AddNodeDialog() {
       setTtl('24')
       setProfile(DEFAULT_PROFILE)
       setCreated(undefined)
-      setWithUnbound(false)
+      setResolver('none')
+      setWithECS(false)
       create.reset()
     }
   }
@@ -70,7 +85,8 @@ export function AddNodeDialog() {
     )
   }
 
-  const installCommand = created ? created.install_command + (withUnbound ? ' --with-unbound' : '') : ''
+  const res = RESOLVERS.find((r) => r.id === resolver) ?? RESOLVERS[0]
+  const installCommand = created ? created.install_command + res.flag + (res.flag && withECS ? ' --with-ecs' : '') : ''
 
   return (
     <Dialog open={open} onOpenChange={reset}>
@@ -91,14 +107,36 @@ export function AddNodeDialog() {
                 <TimeAgo date={created.expires_at} /> ({fmtDateTime(created.expires_at)}).
               </DialogDescription>
             </DialogHeader>
-            <div className="flex items-start gap-2">
-              <Checkbox id="with-unbound" checked={withUnbound} onCheckedChange={(v) => setWithUnbound(v === true)} className="mt-0.5" />
-              <Label htmlFor="with-unbound" className="grid gap-0.5 font-normal">
-                <span className="font-medium">Also install Unbound recursive resolver</span>
-                <span className="text-xs text-muted-foreground">
-                  DNSSEC-validating cache on 127.0.0.1:5335 instead of forwarding to public DNS. Set the profile upstream to 127.0.0.1:5335.
-                </span>
-              </Label>
+            <div className="grid gap-2">
+              <Label htmlFor="local-resolver">Local recursive resolver</Label>
+              <Select value={resolver} onValueChange={(v) => setResolver(v as Resolver)}>
+                <SelectTrigger id="local-resolver" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {RESOLVERS.map((r) => (
+                    <SelectItem key={r.id} value={r.id}>
+                      {r.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {res.help}
+                {res.flag && ' DNSSEC-validating, on 127.0.0.1:5335: set it as the profile upstream.'}
+              </p>
+              {res.flag && (
+                <div className="flex items-start gap-2">
+                  <Checkbox id="with-ecs" checked={withECS} onCheckedChange={(v) => setWithECS(v === true)} className="mt-0.5" />
+                  <Label htmlFor="with-ecs" className="grid gap-0.5 font-normal">
+                    <span className="font-medium">Pass client subnet (ECS) to authoritative servers</span>
+                    <span className="text-xs text-muted-foreground">
+                      So CDNs answer for the customer's location, not the node's. Also turn ECS on for 127.0.0.1:5335 in the profile's
+                      upstreams.
+                    </span>
+                  </Label>
+                </div>
+              )}
             </div>
             <div className="flex items-start gap-2 rounded-md border bg-muted/50 p-3">
               <code className="min-w-0 flex-1 font-mono text-xs break-all">{installCommand}</code>

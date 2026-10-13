@@ -143,9 +143,9 @@ The full initial schema is `migrations/0001_init.up.sql`. Summary:
   created_at, published bool)` unique(profile_id, version). `spec` is `api.ConfigSpec`.
 * `nodes.profile_id → config_profiles` and optional `nodes.overrides jsonb` (per-node
   values merged over the profile: listen IPs, weights, etc. — see §6.3).
-* `blocklist_sources(id, name, kind 'trustpositif_domains'|'trustpositif_ips'|'url_domains'|'url_ips'|'manual_domains'|'manual_ips'|'whitelist', url, content text, enabled, etag, last_modified, last_fetch_at, last_status, entries int)`
-* `blocklist_builds(id bigserial, started_at, finished_at, status 'running'|'ok'|'failed'|'skipped', domains int, ips int, whitelisted int, size_bytes bigint, sha256 text, error text, trigger 'schedule'|'manual')`
-  — the newest `ok` build is "current". Artifact file: `$DATA_DIR/blocklist/<sha256>.cdb`.
+* `blocklist_sources(id, name, kind 'trustpositif_domains'|'trustpositif_ips'|'url_domains'|'url_ips'|'manual_domains'|'manual_ips'|'whitelist', url, content text, enabled, profile_id uuid NULL → config_profiles, etag, last_modified, last_fetch_at, last_status, entries int)`
+* `blocklist_builds(id bigserial, started_at, finished_at, status 'running'|'ok'|'failed'|'skipped', profile_id uuid NULL → config_profiles, domains int, ips int, whitelisted int, size_bytes bigint, sha256 text, error text, trigger 'schedule'|'manual')`
+  — `profile_id IS NULL` is the global scope; the newest `ok` build **of a scope** is its "current" build. Artifact file: `$DATA_DIR/blocklist/<sha256>.cdb` (shared by any scope that produces identical content).
 * `metrics_minutely(node_id, ts timestamptz (minute), queries, responses, cache_hits,
   cache_misses, blocked, dyn_blocked, rule_drops, servfail, nxdomain, noerror,
   latency_avg_ms real, cgk_rewrites, pk(node_id, ts))` — retention 35 days.
@@ -185,9 +185,11 @@ panel on save and in the agent before rendering.
   "acl": ["10.0.0.0/8", "100.64.0.0/10", "…"],            // client allowlist
   "upstreams": {
     "policy": "whashedLatency",     // whashed | whashedLatency | wrandom | leastOutstanding | roundrobin | firstAvailable
-    "servers": [ {"address": "192.0.2.53:53", "weight": 40, "order": 1, "sockets": 4, "name": "resolver1"} ],
+    "servers": [ {"address": "192.0.2.53:53", "weight": 40, "order": 1, "sockets": 4, "name": "resolver1",
+                  "ecs": false} ],  // §6.11: send EDNS Client Subnet to this upstream
     "health_check_interval_s": 1,
-    "latency_floor_ms": 0           // whashedLatency: faster than this = equally fast (0 = 20 ms), 0..10000
+    "latency_floor_ms": 0,          // whashedLatency: faster than this = equally fast (0 = 20 ms), 0..10000
+    "ecs_prefix_v4": 0, "ecs_prefix_v6": 0  // §6.11: 0 = 24 / 56
   },
   "cache": {"enabled": true, "max_entries": 500000, "min_ttl": 0, "max_ttl": 86400, "stale_ttl": 3600},
   "blocking": {
@@ -226,7 +228,7 @@ panel on save and in the agent before rendering.
     "allow_force_aaaa": false,                       // also drop A when IPv6 is faster
     "exclude": []                                    // names + subdomains never touched
   },
-  "ip_alias": {                     // §6.11, opt-in: smartdns ip-rules ip-set aliasing
+  "ip_alias": {                     // §6.12, opt-in: smartdns ip-rules ip-set aliasing
     "enabled": false,
     "rules": [                                        // one hook per rule in ip-alias.lua
       {"name": "cf",                                // identifies the rule (metrics, logs)
@@ -547,7 +549,22 @@ CD is set before the packet cache lookup and is part of the cache key, so valida
 unvalidated answers never mix. The profile editor lists the top SERVFAIL names of the last
 7 days (§19) with one-click add and a DNSViz link: not every SERVFAIL is DNSSEC.
 
-### 6.11 IP-alias (pin CDN answers to a chosen edge IP)
+### 6.11 EDNS Client Subnet
+
+Per upstream `ecs` renders `useClientSubnet = true`: dnsdist adds the client address,
+truncated by `setECSSourcePrefixV4/V6` (`ecs_prefix_v4/v6`, 0 = 24 / 56), unless the query
+already carries ECS. Only upstreams that act on it benefit (Google, a recursor with ECS
+enabled towards authoritative servers; Cloudflare ignores ECS), so it is off by default.
+With any ECS upstream the packet cache gets `parseECS = true`: answers are cached per
+subnet, and scope-0 answers (not subnet specific) once for everyone (zero-scope), which
+keeps the hit rate up. `setECSOverride(true)` replaces any ECS a client sent (no spoofed or
+internal subnets passed on), and clients from private / CGNAT / loopback / link-local / ULA
+space get an empty `/0` (`SetECSPrefixLengthAction(0, 0)`), so their addresses never leave
+the node. Specs without these fields decode to ECS off.
+A local resolver from `install.sh --with-unbound|--with-recursor --with-ecs` passes it on to
+authoritative servers (§13): turn `ecs` on for its upstream `127.0.0.1:5335`.
+
+### 6.12 IP-alias (pin CDN answers to a chosen edge IP)
 
 smartdns' `ip-rules` ip-set aliasing for dnsdist: an A/AAAA answer whose address falls
 inside a rule's `match_pools` (the CDN's published space) is rewritten to the rule's
@@ -591,6 +608,15 @@ Defaults seeded by migration: TrustPositif domains
 `https://trustpositif.komdigi.go.id/assets/db/ipaddress_isp`. Admins can add URL lists,
 manual lists (textarea) and a whitelist.
 
+**Profiles.** Every source belongs to a scope: `profile_id IS NULL` is **global** and is
+shared by every profile, a non-null `profile_id` scopes the source to that one config
+profile. A profile therefore blocks the union of the global and its own sources; a source
+can be moved between scopes with `PATCH /blocklist/sources/{id}`. The blocklist page
+exposes a profile selector so an operator creates and manages per-profile blocklists.
+Deleting a config profile **cascades**: its sources and its build history go with it, and
+its nodes fall back to the global build until a global build exists (the UI warns before
+the delete).
+
 Fetch with a browser User-Agent, `If-None-Match` / `If-Modified-Since`, 120 s timeout,
 streaming (never hold the 220 MB body in memory as a string).
 
@@ -609,7 +635,14 @@ same fields (`bytes`, `seconds`, `mb_per_s`, `streams`) are logged.
 
 ### 7.2 Build
 
-* Schedule: every 3 h (setting), plus "Build now" button.
+* Schedule: every 3 h (setting), plus "Build now" button. Each scope (global, and every
+  profile that owns an enabled source or still has an `ok` build) builds on its own clock
+  and into its own CDB. Keeping a profile with an `ok` build in the scope list is what lets
+  a profile whose last source was deleted converge to the global set instead of pinning a
+  stale artifact.
+* A scope builds from its own sources **plus** the global ones; sources scoped to another
+  profile are never included. The fingerprint is kept per scope, so an unchanged scope is
+  skipped even when another scope rebuilt.
 * If every URL source returns 304 and manual/whitelist unchanged → build `skipped`.
 * A 304 on one source must **not** drop that source: keep the last successful raw
   download of every URL source on disk (`$DATA_DIR/blocklist/sources/<id>.txt`) and always
@@ -636,9 +669,11 @@ expanded only if ≤ /24 (≤ 256 keys), larger ones are skipped and counted.
 
 ### 7.4 Serving
 
-`GET /agent/v1/blocklist` → 200 with the current CDB (`ETag: "<sha256>"`,
-`X-Dnsjos-Sha256`, `Content-Length`), 304 on matching `If-None-Match`. Served with
-`http.ServeContent` (supports Range, so agents can resume).
+`GET /agent/v1/blocklist` → 200 with the CDB the node's profile should run: the profile's
+own newest `ok` build, or the global build when the profile has none of its own (`ETag:
+"<sha256>"`, `X-Dnsjos-Sha256`, `Content-Length`), 304 on matching `If-None-Match`. Served
+with `http.ServeContent` (supports Range, so agents can resume). A `?profile_id=` query
+parameter overrides the node's own scope (empty = global; only its presence tells that apart from no override). On every blocklist endpoint a `profile_id` that is not a uuid is a 400.
 
 ---
 
@@ -825,8 +860,9 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `POST /api/v1/profiles/{id}/versions/{v}/publish` | → `ConfigVersion`; `?staged=true` = one node at a time (§6.5): 422 `invalid_rollout`, 409 `upgrade_running`/`nodes_not_ready`, `Location` of the run. A plain publish clears the profile's pins; 409 `upgrade_running` while a config run of that profile is active |
 | `GET /api/v1/profiles/{id}/versions/{a}/diff/{b}` | `ConfigVersionDiff{a,b,changes}` — both versions plus `SpecChange{path,op,old,new}` entries turning a into b |
 | `POST /api/v1/profiles/{id}/preview` | `PreviewRequest{spec}` (validated, not saved) → `RenderedConfig` |
-| `GET/POST /api/v1/blocklist/sources` · `PATCH/DELETE /blocklist/sources/{id}` | `List[BlocklistSource]` · `BlocklistSourceCreate` → 201 `BlocklistSource` · `BlocklistSourcePatch` → `BlocklistSource` · 204 |
-| `GET /api/v1/blocklist/builds` · `POST /blocklist/builds` · `GET /blocklist/current` | `List[BlocklistBuild]` (newest first) · build now → 202 `BlocklistBuild` · current `BlocklistBuild` or `null` |
+| `GET/POST /api/v1/blocklist/sources` · `PATCH/DELETE /blocklist/sources/{id}` | `List[BlocklistSource]` · `BlocklistSourceCreate{...,profile_id?}` → 201 `BlocklistSource` · `BlocklistSourcePatch{...,profile_id?}` → `BlocklistSource` · 204. `?profile_id=` (empty = global) filters by scope; `profile_id` on a source/build is `""` for the global scope plus the owning `profile_name` |
+| `GET /api/v1/blocklist/builds` · `POST /blocklist/builds` · `GET /blocklist/current` | `List[BlocklistBuild]` (newest first) · build now → 202 `BlocklistBuild` · current `BlocklistBuild` or `null`. `?profile_id=` (empty = global) scopes the list, the trigger and the lookup; omitted = every scope (POST builds the global scope) |
+| `GET /api/v1/blocklist/profiles` | `List[BlocklistProfile{id,name,description,source_count,own_build,effective_build,uses_global}]` — every config profile with its blocklist scope; `uses_global` when it has no build of its own and is served the global one |
 | `GET /api/v1/blocklist/lookup?name=` | `BlocklistLookup{name,blocked,match,allowed,allow_entry}` (checks current CDB incl. suffix walk; `allowed`/`allow_entry` = the most specific active allowlist entry covering the name or IP, else `false`/`null`) |
 | `GET /api/v1/allowlist` · `POST` · `DELETE /allowlist/{id}` | `List[AllowEntry{id,kind,value,reason,created_by_email,created_at,expires_at}]` (active entries, newest first) · admin: `AllowEntryCreate{kind,value,reason,expires_at?}` → 201 `AllowEntry` (value normalized; 422 `invalid_entry` for a bad kind/value, a TLD, a too-broad prefix, reason > 1000 bytes or an expiry not in the future; 409 `conflict` when the entry is already active — an expired row is replaced) · admin: 204 (404 unknown). Audited as `allowlist.create` / `allowlist.delete` (§7.5) |
 | `GET /api/v1/reports/blocked?from&to&node_id&limit` | `BlockedReport{total,by_node,by_month,top_domains}` (`from`/`to` are dates `YYYY-MM-DD`) |
@@ -920,6 +956,18 @@ POSIX sh, idempotent, Debian 12/13 and Ubuntu 22.04/24.04, amd64/arm64:
    never binds :53; `unbound-resolvconf` masked). Tuned from the host: a thread per core (max 8),
    rrset cache RAM/16 (64m–1g), prefetch, serve-expired (RFC 8767), aggressive NSEC, IPv6
    only when a ping over IPv6 reaches the internet (a route alone can be a dead uplink). Profiles use it as upstream `127.0.0.1:5335`.
+   `--with-recursor` installs PowerDNS Recursor instead (`repo.powerdns.com`, `rec-54` pinned like
+   dnsdist; config in `/etc/powerdns/recursor.d/dnsjos.yml` before the package): same port, a
+   thread per core (max 8), record cache ~250 entries/MB RAM (200k–2M, packet cache half),
+   `dnssec.validation: validate`, refresh at 10 % TTL left, serve-stale up to a day, outgoing
+   IPv6 under the same ping check. The two are exclusive; the installer refuses while the other
+   one runs. `--with-ecs` makes either pass the ECS dnsdist adds (§6.11) to every authoritative
+   server, as public resolvers do (Unbound: `subnetcache` + `send-client-subnet: 0.0.0.0/0,
+   ::0/0`; Recursor: `use_incoming_edns_subnet` + `edns_subnet_allow_list: 0.0.0.0/0, ::/0`),
+   or with `--ecs-zones LIST` only to those zones' name servers (`client-subnet-zone` /
+   allow-list domains). Queries without ECS send none; for dnsdist's empty `/0` Recursor
+   sends the node's own IPv4 (`ecs.scope_zero_address`), not 127.0.0.1. Unbound also gets
+   `extended-statistics` for `unbound-control stats` / unbound_exporter.
    Kernel/NIC tuning (`/etc/sysctl.d/91-dnsjos-tuning.conf`, never lowering a value already
    raised): backlog ≥ 16384, source ports 10000–65535 (unless a TCP service listens in
    10000–32767), swappiness 10, fq + bbr, THP madvise, `performance` governor on bare metal.

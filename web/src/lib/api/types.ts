@@ -36,6 +36,7 @@ export interface Upstream {
   order: number
   sockets: number
   name: string
+  ecs?: boolean // send EDNS Client Subnet (useClientSubnet); absent in older specs
 }
 export interface Upstreams {
   policy: ServerPolicy
@@ -43,6 +44,9 @@ export interface Upstreams {
   health_check_interval_s: number
   /** whashedLatency only: upstreams faster than this count as equally fast (0 = 20 ms). */
   latency_floor_ms: number
+  /** ECS prefix lengths for upstreams with ecs on (0 = 24 / 56). */
+  ecs_prefix_v4: number
+  ecs_prefix_v6: number
 }
 
 export interface Cache {
@@ -576,6 +580,9 @@ export interface BlocklistSource {
   id: string
   name: string
   kind: BlocklistSourceKind
+  /** Config profile that owns the source; "" = global (shared by all profiles). */
+  profile_id: string
+  profile_name: string
   url: string
   content: string
   enabled: boolean
@@ -591,6 +598,8 @@ export interface BlocklistSource {
 export interface BlocklistSourceCreate {
   name: string
   kind: BlocklistSourceKind
+  /** Owning config profile; "" = global (shared by all profiles). */
+  profile_id?: string
   url: string
   content: string
   enabled?: boolean
@@ -598,6 +607,8 @@ export interface BlocklistSourceCreate {
 
 export interface BlocklistSourcePatch {
   name?: string
+  /** Move the source to another profile ("" = global). */
+  profile_id?: string
   url?: string
   content?: string
   enabled?: boolean
@@ -606,6 +617,9 @@ export interface BlocklistSourcePatch {
 export type BuildStatus = 'running' | 'ok' | 'failed' | 'skipped'
 export interface BlocklistBuild {
   id: number
+  /** Config profile the build belongs to; "" = the global build. */
+  profile_id: string
+  profile_name: string
   started_at: string
   finished_at: string | null
   status: BuildStatus
@@ -619,6 +633,20 @@ export interface BlocklistBuild {
   error: string
   added: number
   removed: number
+}
+
+/** GET /blocklist/profiles: every config profile plus its blocklist scope. */
+export interface BlocklistProfile {
+  id: string
+  name: string
+  description: string
+  source_count: number
+  /** The profile's own newest build, if any. */
+  own_build: BlocklistBuild | null
+  /** The build the profile is actually served (its own, or the global one). */
+  effective_build: BlocklistBuild | null
+  /** True when the profile has no own build and inherits the global one. */
+  uses_global: boolean
 }
 
 export interface BlocklistLookup {

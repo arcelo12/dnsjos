@@ -110,7 +110,7 @@ function RuleCard({ rule, index, onPatch, onRemove }: {
   )
 }
 
-/** Nested editor for ip_alias (SPEC §6.11): rules that pin CDN answers to chosen edge IPs. */
+/** Nested editor for ip_alias (SPEC §6.12): rules that pin CDN answers to chosen edge IPs. */
 export function IPAliasEditor({ value, onChange }: { value: IPAlias; onChange: (v: IPAlias) => void }) {
   const ro = useReadOnly()
   const rules = value.rules

@@ -1,6 +1,7 @@
 #!/bin/sh
 # DnsJos node installer (SPEC §13), served by the panel at /install.sh.
-#   curl -fsSL {{.PanelURL}}/install.sh | sudo sh -s -- --token TOKEN [--panel URL] [--adopt] [--no-start] [--with-unbound]
+#   curl -fsSL {{.PanelURL}}/install.sh | sudo sh -s -- --token TOKEN [--panel URL] [--adopt] [--no-start]
+#     [--with-unbound | --with-recursor] [--with-ecs [--ecs-zones LIST]]
 # Idempotent: safe to re-run. Supports Debian 12/13 and Ubuntu 22.04/24.04 on amd64/arm64.
 set -eu
 
@@ -9,7 +10,16 @@ TOKEN=''
 ADOPT=0
 NO_START=0
 WITH_UNBOUND=0
-UNBOUND_ADDR='127.0.0.1@5335' # local recursive resolver, set as the profile upstream 127.0.0.1:5335
+WITH_RECURSOR=0
+WITH_ECS=0
+# Local recursive resolver (Unbound or PowerDNS Recursor), the profile upstream 127.0.0.1:5335.
+RESOLVER_IP='127.0.0.1'
+RESOLVER_PORT=5335
+REC_SERIES='54' # PowerDNS Recursor 5.4.x from repo.powerdns.com (rec-55 is still alpha)
+# With --with-ecs the client subnet (/24, /56; never private or CGNAT ranges, dnsdist strips
+# those) goes to every authoritative server, as public resolvers do. --ecs-zones LIST limits
+# it to the name servers of those zones (e.g. CDNs only).
+ECS_ZONES='all'
 DNSDIST_SERIES='20' # dnsdist 2.0.x from repo.powerdns.com
 AGENT_BIN=/usr/local/bin/dnsjos-agent
 AGENT_CONF=/etc/dnsjos/agent.json
@@ -21,14 +31,20 @@ die() { printf 'dnsjos-install: error: %s\n' "$*" >&2; exit 1; }
 
 usage() {
 	cat <<EOF
-usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start] [--with-unbound]
+usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start]
+                  [--with-unbound | --with-recursor] [--with-ecs [--ecs-zones LIST]]
   --token TOKEN  enrollment token from the panel (Nodes -> Add node)
   --panel URL    panel URL (default: $PANEL_URL)
   --adopt        take over a live dnsdist server: keep its dnsdist package, secrets,
                  listeners and port 53 setup (no repo, no install/upgrade, no resolved changes)
   --no-start     install the agent service but do not start it (review with 'dnsjos-agent plan')
-  --with-unbound also install Unbound as a local recursive, DNSSEC-validating resolver on
-                 127.0.0.1:5335; point the profile upstreams at it to stop forwarding to public DNS
+  --with-unbound  also install Unbound as a local recursive, DNSSEC-validating resolver on
+                  127.0.0.1:5335; point the profile upstreams at it to stop forwarding to public DNS
+  --with-recursor the same with PowerDNS Recursor (repo.powerdns.com, same vendor as dnsdist)
+  --with-ecs      let the local resolver pass EDNS Client Subnet from dnsdist on to
+                  authoritative servers (also turn ECS on for 127.0.0.1:5335 in the profile)
+  --ecs-zones LIST  only send it for these zones (comma or space separated domains);
+                  default: all authoritative servers
 EOF
 }
 
@@ -41,6 +57,10 @@ while [ $# -gt 0 ]; do
 		--adopt) ADOPT=1; shift ;;
 		--no-start) NO_START=1; shift ;;
 		--with-unbound) WITH_UNBOUND=1; shift ;;
+		--with-recursor) WITH_RECURSOR=1; shift ;;
+		--with-ecs) WITH_ECS=1; shift ;;
+		--ecs-zones) [ $# -ge 2 ] || die "--ecs-zones needs a value"; ECS_ZONES=$2; shift 2 ;;
+		--ecs-zones=*) ECS_ZONES=${1#--ecs-zones=}; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage >&2; die "unknown argument: $1" ;;
 	esac
@@ -50,6 +70,13 @@ PANEL_URL=${PANEL_URL%/}
 [ "$(id -u)" -eq 0 ] || die "must run as root (pipe into 'sudo sh')"
 [ -n "$TOKEN" ] || [ -s "$AGENT_CONF" ] || { usage >&2; die "--token is required"; }
 case "$PANEL_URL" in http://*|https://*) ;; *) die "--panel must be an http(s) URL" ;; esac
+[ "$WITH_UNBOUND$WITH_RECURSOR" != 11 ] || die "--with-unbound and --with-recursor both listen on $RESOLVER_IP:$RESOLVER_PORT: pick one"
+[ "$WITH_ECS" = 0 ] || [ "$WITH_UNBOUND$WITH_RECURSOR" != 00 ] || die "--with-ecs needs --with-unbound or --with-recursor"
+ECS_ZONES=$(printf '%s\n' "$ECS_ZONES" | tr ', ' '\n\n' | sed 's/\.$//' | grep . | sort -u)
+[ "$ECS_ZONES" != all ] || ECS_ZONES=''
+for z in $ECS_ZONES; do
+	printf '%s\n' "$z" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]{0,252})$' || die "--ecs-zones: '$z' is not a domain name"
+done
 
 # ── 1. OS / architecture ────────────────────────────────────────────────────
 [ -r /etc/os-release ] || die "cannot read /etc/os-release"
@@ -237,38 +264,65 @@ if [ "$ADOPT" = 0 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null;
 	fi
 fi
 
-# ── 4b. optional Unbound recursive resolver on loopback ──────────────────────
-# Config goes in before the package so Unbound never starts on its default :53 (dnsdist's).
-if [ "$WITH_UNBOUND" = 1 ]; then
-	say "installing unbound on ${UNBOUND_ADDR%@*}:${UNBOUND_ADDR#*@}"
-	mkdir -p /etc/unbound/unbound.conf.d
-	# Sized from the host: a thread per core (power-of-two slabs to cut lock contention) and
-	# rrset cache = RAM/16 in 64m..1g, msg cache half that (Unbound uses ~2.5x the configured size).
-	UB_THREADS=$(nproc 2>/dev/null || echo 1)
-	[ "$UB_THREADS" -le 8 ] || UB_THREADS=8
-	UB_SLABS=1
-	while [ "$UB_SLABS" -lt "$UB_THREADS" ]; do UB_SLABS=$((UB_SLABS * 2)); done
-	UB_RRSET=$(awk '/^MemTotal:/ {m = int($2 / 1024 / 16); if (m < 64) m = 64; if (m > 1024) m = 1024; print m; exit}' /proc/meminfo)
-	UB_RRSET=${UB_RRSET:-128}
+# ── 4b. optional local recursive resolver on loopback (Unbound or Recursor) ──
+# Config goes in before the package so the resolver never starts on its default :53 (dnsdist's).
+if [ "$WITH_UNBOUND$WITH_RECURSOR" != 00 ]; then
+	# Both listen on the same port: never install one while the other runs.
+	for other in unbound pdns-recursor; do
+		case "$other:$WITH_UNBOUND" in unbound:1 | pdns-recursor:0) continue ;; esac
+		! systemctl is-active --quiet "$other" 2>/dev/null ||
+			die "$other is running on this node: 'systemctl disable --now $other' first to switch resolvers"
+	done
+	# Sized from the host: a thread per core, at most 8.
+	RES_THREADS=$(nproc 2>/dev/null || echo 1)
+	[ "$RES_THREADS" -le 8 ] || RES_THREADS=8
 	# Only use IPv6 name servers when IPv6 actually reaches the internet: a default route
 	# with a dead uplink makes every first lookup wait for IPv6 timeouts.
-	UB_IP6=no
+	RES_IP6=no
 	if [ -n "$(ip -6 route show default 2>/dev/null)" ] &&
 		{ ping -6 -c 1 -W 2 2001:4860:4860::8888 || ping -6 -c 1 -W 2 2606:4700:4700::1111; } >/dev/null 2>&1; then
-		UB_IP6=yes
+		RES_IP6=yes
+	fi
+fi
+
+if [ "$WITH_UNBOUND" = 1 ]; then
+	say "installing unbound on $RESOLVER_IP:$RESOLVER_PORT"
+	mkdir -p /etc/unbound/unbound.conf.d
+	# Power-of-two slabs cut lock contention; rrset cache = RAM/16 in 64m..1g, msg cache half
+	# that (Unbound uses ~2.5x the configured size).
+	UB_SLABS=1
+	while [ "$UB_SLABS" -lt "$RES_THREADS" ]; do UB_SLABS=$((UB_SLABS * 2)); done
+	UB_RRSET=$(awk '/^MemTotal:/ {m = int($2 / 1024 / 16); if (m < 64) m = 64; if (m > 1024) m = 1024; print m; exit}' /proc/meminfo)
+	UB_RRSET=${UB_RRSET:-128}
+	# ECS: pass the client subnet dnsdist adds on to authoritative servers (all, or only
+	# --ecs-zones); the subnetcache module keeps per-subnet answers apart, scope-0 ones shared.
+	UB_ECS=''
+	if [ "$WITH_ECS" = 1 ]; then
+		UB_ECS='
+    # EDNS Client Subnet from dnsdist, passed on to authoritative servers
+    module-config: "subnetcache validator iterator"'
+		if [ -z "$ECS_ZONES" ]; then
+			UB_ECS="$UB_ECS
+    send-client-subnet: 0.0.0.0/0
+    send-client-subnet: ::0/0"
+		fi
+		for z in $ECS_ZONES; do UB_ECS="$UB_ECS
+    client-subnet-zone: $z"; done
 	fi
 	cat >/etc/unbound/unbound.conf.d/dnsjos.conf <<EOF
 # Managed by the DnsJos installer: recursive resolver behind dnsdist, loopback only.
 # Re-run the installer with --with-unbound to resize after a CPU/RAM change.
 server:
-    interface: ${UNBOUND_ADDR}
+    interface: ${RESOLVER_IP}@${RESOLVER_PORT}
     access-control: 127.0.0.0/8 allow
-    do-ip6: ${UB_IP6}
+    do-ip6: ${RES_IP6}
     hide-identity: yes
     hide-version: yes
+    # cache counts, rcodes and query types for unbound_exporter / unbound-control stats
+    extended-statistics: yes
 
     # threads and sockets
-    num-threads: ${UB_THREADS}
+    num-threads: ${RES_THREADS}
     so-reuseport: yes
     so-rcvbuf: 4m
     so-sndbuf: 4m
@@ -299,6 +353,7 @@ server:
     qname-minimisation: yes
     rrset-roundrobin: yes
     harden-below-nxdomain: yes
+${UB_ECS}
 EOF
 	# The package would point the host's resolv.conf at 127.0.0.1:53, where dnsdist (not Unbound) answers.
 	systemctl mask unbound-resolvconf.service >/dev/null 2>&1 || true
@@ -310,7 +365,86 @@ EOF
 	unbound-checkconf >/dev/null || die "unbound config check failed (unbound-checkconf)"
 	systemctl enable unbound >/dev/null 2>&1
 	systemctl restart unbound
-	say "unbound ready: set the profile upstream to ${UNBOUND_ADDR%@*}:${UNBOUND_ADDR#*@}"
+	say "unbound ready: set the profile upstream to $RESOLVER_IP:$RESOLVER_PORT"
+fi
+
+if [ "$WITH_RECURSOR" = 1 ]; then
+	say "installing PowerDNS Recursor $REC_SERIES on $RESOLVER_IP:$RESOLVER_PORT"
+	# Record cache ~250 entries per MB of RAM (4 GB: ~1M, Recursor's default), 200k..2M;
+	# the packet cache half that.
+	REC_ENTRIES=$(awk '/^MemTotal:/ {m = int($2 / 1024 * 250); if (m < 200000) m = 200000; if (m > 2000000) m = 2000000; print m; exit}' /proc/meminfo)
+	REC_ENTRIES=${REC_ENTRIES:-1000000}
+	REC_SRC6=''
+	[ "$RES_IP6" = no ] || REC_SRC6="
+    - '::'"
+	REC_ECS_IN='' REC_ECS_OUT='' REC_ECS=''
+	if [ "$WITH_ECS" = 1 ]; then
+		# Take the client subnet dnsdist adds and pass it on (all servers, or only --ecs-zones).
+		REC_ECS_IN='
+  use_incoming_edns_subnet: true'
+		REC_ECS_OUT='
+  edns_subnet_allow_list:'
+		for z in ${ECS_ZONES:-0.0.0.0/0 ::/0}; do REC_ECS_OUT="$REC_ECS_OUT
+    - '$z'"; done
+		# Clients dnsdist sends with an empty /0 (private/CGNAT): send this node's address,
+		# not 127.0.0.1, so CDNs answer for the node's location as without ECS.
+		REC_PUB4=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+		# Behind NAT (cloud VMs, a router) that source is private: sending it would leak an
+		# internal subnet, so only use a public address (the ranges dnsdist strips, render.go).
+		case $REC_PUB4 in
+		10.* | 127.* | 169.254.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[01].* | \
+			100.6[4-9].* | 100.[7-9][0-9].* | 100.1[01][0-9].* | 100.12[0-7].*) REC_PUB4='' ;;
+		esac
+		[ -z "$REC_PUB4" ] || REC_ECS="
+ecs:
+  scope_zero_address: $REC_PUB4"
+	fi
+	mkdir -p /etc/powerdns/recursor.d
+	cat >/etc/powerdns/recursor.d/dnsjos.yml <<EOF
+# Managed by the DnsJos installer: recursive resolver behind dnsdist, loopback only.
+# Re-run the installer with --with-recursor to resize after a CPU/RAM change.
+incoming:
+  listen:
+    - '${RESOLVER_IP}:${RESOLVER_PORT}'
+  allow_from:
+    - 127.0.0.0/8${REC_ECS_IN}
+recursor:
+  threads: ${RES_THREADS}
+outgoing:
+  source_address:
+    - 0.0.0.0${REC_SRC6}${REC_ECS_OUT}
+dnssec:
+  # Always validate (the default "process" only validates when the client asks).
+  validation: validate
+recordcache:
+  max_entries: ${REC_ENTRIES}
+  # Refresh names when 10% of their TTL is left (prefetch); serve stale for up to a day
+  # (2880 x 30 s) when a refresh fails (RFC 8767).
+  refresh_on_ttl_perc: 10
+  serve_stale_extensions: 2880
+packetcache:
+  max_entries: $((REC_ENTRIES / 2))${REC_ECS}
+EOF
+	if ! command -v pdns_recursor >/dev/null 2>&1; then
+		REC_KEYRING=/etc/apt/keyrings/pdns-rec-pub.asc
+		install -d -m 0755 /etc/apt/keyrings
+		curl -fsSL https://repo.powerdns.com/FD380FBB-pub.asc -o "$REC_KEYRING.tmp"
+		mv "$REC_KEYRING.tmp" "$REC_KEYRING"
+		chmod 0644 "$REC_KEYRING"
+		echo "deb [signed-by=$REC_KEYRING] https://repo.powerdns.com/$OS_ID $CODENAME-rec-$REC_SERIES main" \
+			>/etc/apt/sources.list.d/pdns-rec.list
+		cat >/etc/apt/preferences.d/pdns-rec-$REC_SERIES <<EOF
+Package: pdns-recursor*
+Pin: origin repo.powerdns.com
+Pin-Priority: 600
+EOF
+		apt-get update -q
+		# shellcheck disable=SC2086
+		apt-get install $APT_OPTS pdns-recursor
+	fi
+	systemctl enable pdns-recursor >/dev/null 2>&1
+	systemctl restart pdns-recursor || die "pdns-recursor did not start: journalctl -u pdns-recursor"
+	say "PowerDNS Recursor ready: set the profile upstream to $RESOLVER_IP:$RESOLVER_PORT"
 fi
 
 # ── 5. agent binary (sha256-verified) ───────────────────────────────────────

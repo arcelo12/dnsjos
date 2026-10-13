@@ -17,6 +17,7 @@ import type {
   BlocklistChange,
   BlocklistChangesQuery,
   BlocklistLookup,
+  BlocklistProfile,
   BlocklistSource,
   BlocklistSourceCreate,
   BlocklistSourcePatch,
@@ -87,6 +88,23 @@ export function qs(params?: Params): string {
   const sp = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') sp.set(k, String(v))
   const s = sp.toString()
+  return s ? `?${s}` : ''
+}
+
+/**
+ * The blocklist scope query. undefined omits profile_id (every scope); '' is sent as a
+ * present-but-empty profile_id, which the API reads as the global scope, so qs (which drops
+ * empty values) cannot be used here.
+ */
+export function profileScope(profileId?: string): string {
+  return profileId === undefined ? '' : `?profile_id=${enc(profileId)}`
+}
+
+function buildQuery(profileId: string | undefined, force: boolean): string {
+  const params = new URLSearchParams()
+  if (profileId !== undefined) params.set('profile_id', profileId)
+  if (force) params.set('force', 'true')
+  const s = params.toString()
   return s ? `?${s}` : ''
 }
 
@@ -175,13 +193,20 @@ export const api = {
     preview: (id: string, spec: ConfigSpec) => post<RenderedConfig>(`${V1}/profiles/${id}/preview`, { spec }),
   },
   blocklist: {
-    sources: () => get<List<BlocklistSource>>(`${V1}/blocklist/sources`),
+    /** profileId omitted = every scope; '' = global; otherwise that config profile. */
+    sources: (profileId?: string) =>
+      get<List<BlocklistSource>>(`${V1}/blocklist/sources${profileScope(profileId)}`),
     createSource: (s: BlocklistSourceCreate) => post<BlocklistSource>(`${V1}/blocklist/sources`, s),
     updateSource: (id: string, s: BlocklistSourcePatch) => patch<BlocklistSource>(`${V1}/blocklist/sources/${id}`, s),
     removeSource: (id: string) => del(`${V1}/blocklist/sources/${id}`),
-    builds: () => get<List<BlocklistBuild>>(`${V1}/blocklist/builds`),
-    build: (force = false) => post<BlocklistBuild>(`${V1}/blocklist/builds${force ? '?force=true' : ''}`),
-    current: () => get<BlocklistBuild | null>(`${V1}/blocklist/current`),
+    builds: (profileId?: string) => get<List<BlocklistBuild>>(`${V1}/blocklist/builds${profileScope(profileId)}`),
+    build: (force = false, profileId?: string) =>
+      post<BlocklistBuild>(
+        `${V1}/blocklist/builds${buildQuery(profileId, force)}`,
+      ),
+    current: (profileId?: string) =>
+      get<BlocklistBuild | null>(`${V1}/blocklist/current${profileScope(profileId)}`),
+    profiles: () => get<List<BlocklistProfile>>(`${V1}/blocklist/profiles`),
     lookup: (name: string) => get<BlocklistLookup>(`${V1}/blocklist/lookup?name=${enc(name)}`),
     changes: (id: number, q: BlocklistChangesQuery) => get<List<BlocklistChange>>(`${V1}/blocklist/builds/${id}/changes${qs({ ...q })}`),
   },
@@ -249,9 +274,15 @@ export const qk = {
   profileVersions: (id: string) => ['profiles', id, 'versions'] as const,
   profileVersion: (id: string, v: number) => ['profiles', id, 'versions', v] as const,
   versionDiff: (id: string, a: number, b: number) => ['profiles', id, 'diff', a, b] as const,
-  blocklistSources: ['blocklist', 'sources'] as const,
-  blocklistBuilds: ['blocklist', 'builds'] as const,
-  blocklistCurrent: ['blocklist', 'current'] as const,
+  blocklistSources: (profileId?: string) => ['blocklist', 'sources', profileId ?? null] as const,
+  blocklistBuilds: (profileId?: string) => ['blocklist', 'builds', profileId ?? null] as const,
+  blocklistCurrent: (profileId?: string) => ['blocklist', 'current', profileId ?? null] as const,
+  blocklistProfiles: ['blocklist', 'profiles'] as const,
+  // Family keys: a prefix that matches every scope's query (the per-query keys above end in
+  // a profile id, so the bare ["blocklist","sources"] is the correct prefix for "all").
+  blocklistSourcesAll: ['blocklist', 'sources'] as const,
+  blocklistBuildsAll: ['blocklist', 'builds'] as const,
+  blocklistCurrentAll: ['blocklist', 'current'] as const,
   blocklistLookup: (name: string) => ['blocklist', 'lookup', name] as const,
   blocklistChanges: (id: number, q: BlocklistChangesQuery) => ['blocklist', 'changes', id, q] as const,
   allowlist: ['allowlist'] as const,
@@ -328,11 +359,22 @@ export const useVersionDiff = (id: string, a: number | undefined, b: number | un
     queryFn: () => api.profiles.diff(id, a ?? 0, b ?? 0),
     enabled: a !== undefined && b !== undefined,
   })
-export const useBlocklistSources = () => useQuery({ queryKey: qk.blocklistSources, queryFn: api.blocklist.sources })
-export const useBlocklistBuilds = () =>
-  useQuery({ queryKey: qk.blocklistBuilds, queryFn: api.blocklist.builds, refetchInterval: LIVE })
-export const useBlocklistCurrent = () =>
-  useQuery({ queryKey: qk.blocklistCurrent, queryFn: api.blocklist.current, refetchInterval: LIVE })
+export const useBlocklistSources = (profileId?: string) =>
+  useQuery({ queryKey: qk.blocklistSources(profileId), queryFn: () => api.blocklist.sources(profileId) })
+export const useBlocklistBuilds = (profileId?: string) =>
+  useQuery({
+    queryKey: qk.blocklistBuilds(profileId),
+    queryFn: () => api.blocklist.builds(profileId),
+    refetchInterval: LIVE,
+  })
+export const useBlocklistCurrent = (profileId?: string) =>
+  useQuery({
+    queryKey: qk.blocklistCurrent(profileId),
+    queryFn: () => api.blocklist.current(profileId),
+    refetchInterval: LIVE,
+  })
+export const useBlocklistProfiles = () =>
+  useQuery({ queryKey: qk.blocklistProfiles, queryFn: api.blocklist.profiles, refetchInterval: LIVE })
 /** Disabled while name is empty. */
 export const useBlocklistLookup = (name: string) =>
   useQuery({ queryKey: qk.blocklistLookup(name), queryFn: () => api.blocklist.lookup(name), enabled: name !== '' })
@@ -411,18 +453,19 @@ export const usePublishVersion = () =>
     () => [qk.profiles, qk.nodes, qk.upgrades],
   )
 
-export const useCreateSource = () => useMut(api.blocklist.createSource, () => [qk.blocklistSources])
+export const useCreateSource = () => useMut(api.blocklist.createSource, () => [qk.blocklistSourcesAll, qk.blocklistProfiles])
 export const useUpdateSource = () =>
   useMut(
     (a: { id: string; patch: BlocklistSourcePatch }) => api.blocklist.updateSource(a.id, a.patch),
-    () => [qk.blocklistSources],
+    () => [qk.blocklistSourcesAll, qk.blocklistProfiles, qk.blocklistCurrentAll, qk.blocklistBuildsAll],
   )
-export const useDeleteSource = () => useMut(api.blocklist.removeSource, () => [qk.blocklistSources])
+export const useDeleteSource = () => useMut(api.blocklist.removeSource, () => [qk.blocklistSourcesAll, qk.blocklistProfiles])
 export const useBuildNow = () =>
-  useMut((force: boolean = false) => api.blocklist.build(force), () => [
-    qk.blocklistBuilds,
-    qk.blocklistCurrent,
-    qk.blocklistSources,
+  useMut((a: { force?: boolean; profileId?: string }) => api.blocklist.build(a.force ?? false, a.profileId), () => [
+    qk.blocklistBuildsAll,
+    qk.blocklistCurrentAll,
+    qk.blocklistSourcesAll,
+    qk.blocklistProfiles,
     qk.overview,
   ])
 

@@ -64,6 +64,14 @@ func (s ConfigSpec) Validate() error {
 	addrs("listen.do53.addresses", l.Do53.Addresses, l.Do53.Enabled)
 	if l.Do53.Enabled {
 		between("listen.do53.reuse_port_listeners", l.Do53.ReusePortListeners, 1, 64)
+		// "[::]:53" alone does not take IPv4: dnsdist binds IPv6 sockets v6-only, so every
+		// IPv4 client would get no answer (a dns3 outage once).
+		if len(l.Do53.Addresses) > 0 && !slices.ContainsFunc(l.Do53.Addresses, func(a string) bool {
+			ap, err := netip.ParseAddrPort(a)
+			return err == nil && ap.Addr().Is4()
+		}) {
+			bad("listen.do53.addresses", "no IPv4 address, so IPv4 clients get no answer: add 0.0.0.0:53")
+		}
 	}
 	addrs("listen.doh.addresses", l.DoH.Addresses, l.DoH.Enabled)
 	if l.DoH.Enabled && !strings.HasPrefix(l.DoH.Path, "/") {
@@ -106,6 +114,8 @@ func (s ConfigSpec) Validate() error {
 	}
 	between("upstreams.health_check_interval_s", u.HealthCheckIntervalS, 1, 3600)
 	between("upstreams.latency_floor_ms", u.LatencyFloorMs, 0, 10_000)
+	between("upstreams.ecs_prefix_v4", u.ECSPrefixV4, 0, 32)
+	between("upstreams.ecs_prefix_v6", u.ECSPrefixV6, 0, 128)
 
 	c := s.Cache
 	if c.Enabled {
