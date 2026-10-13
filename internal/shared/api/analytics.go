@@ -22,9 +22,11 @@ func DefaultAnalytics() Analytics {
 
 // UnmarshalJSON fills sections missing from specs stored before they existed with their
 // defaults (a missing "analytics" would otherwise decode to an invalid zero value).
+// "cname" and "speed_check" joined later (§6.11), so they start from the default section
+// too: an empty AnswerMode renders as fastest-ip and an empty CNames is disabled.
 func (s *ConfigSpec) UnmarshalJSON(b []byte) error {
 	type plain ConfigSpec
-	p := plain{Analytics: DefaultAnalytics()}
+	p := plain{Analytics: DefaultAnalytics(), SpeedCheck: DefaultConfigSpec().SpeedCheck}
 	if err := json.Unmarshal(b, &p); err != nil {
 		return err
 	}
