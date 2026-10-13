@@ -36,6 +36,7 @@ export interface Upstream {
   order: number
   sockets: number
   name: string
+  ecs?: boolean // send EDNS Client Subnet (useClientSubnet); absent in older specs
 }
 export interface Upstreams {
   policy: ServerPolicy
@@ -43,6 +44,9 @@ export interface Upstreams {
   health_check_interval_s: number
   /** whashedLatency only: upstreams faster than this count as equally fast (0 = 20 ms). */
   latency_floor_ms: number
+  /** ECS prefix lengths for upstreams with ecs on (0 = 24 / 56). */
+  ecs_prefix_v4: number
+  ecs_prefix_v6: number
 }
 
 export interface Cache {

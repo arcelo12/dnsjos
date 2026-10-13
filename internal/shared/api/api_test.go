@@ -17,6 +17,7 @@ func TestValidateRejects(t *testing.T) {
 		"acl":              func(s *ConfigSpec) { s.ACL = []string{"10.0.0.0/33"} },
 		"empty acl":        func(s *ConfigSpec) { s.ACL = nil },
 		"do53 addr":        func(s *ConfigSpec) { s.Listen.Do53.Addresses = []string{"0.0.0.0"} },
+		"do53 ipv6 only":   func(s *ConfigSpec) { s.Listen.Do53.Addresses = []string{"[::]:53"} },
 		"weight 0":         func(s *ConfigSpec) { s.Upstreams.Servers[0].Weight = 0 },
 		"weight 1001":      func(s *ConfigSpec) { s.Upstreams.Servers[0].Weight = 1001 },
 		"upstream addr":    func(s *ConfigSpec) { s.Upstreams.Servers[0].Address = "dns.google:53" },

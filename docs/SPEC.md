@@ -185,9 +185,11 @@ panel on save and in the agent before rendering.
   "acl": ["10.0.0.0/8", "100.64.0.0/10", "…"],            // client allowlist
   "upstreams": {
     "policy": "whashedLatency",     // whashed | whashedLatency | wrandom | leastOutstanding | roundrobin | firstAvailable
-    "servers": [ {"address": "192.0.2.53:53", "weight": 40, "order": 1, "sockets": 4, "name": "resolver1"} ],
+    "servers": [ {"address": "192.0.2.53:53", "weight": 40, "order": 1, "sockets": 4, "name": "resolver1",
+                  "ecs": false} ],  // §6.11: send EDNS Client Subnet to this upstream
     "health_check_interval_s": 1,
-    "latency_floor_ms": 0           // whashedLatency: faster than this = equally fast (0 = 20 ms), 0..10000
+    "latency_floor_ms": 0,          // whashedLatency: faster than this = equally fast (0 = 20 ms), 0..10000
+    "ecs_prefix_v4": 0, "ecs_prefix_v6": 0  // §6.11: 0 = 24 / 56
   },
   "cache": {"enabled": true, "max_entries": 500000, "min_ttl": 0, "max_ttl": 86400, "stale_ttl": 3600},
   "blocking": {
@@ -537,6 +539,21 @@ CD is set before the packet cache lookup and is part of the cache key, so valida
 unvalidated answers never mix. The profile editor lists the top SERVFAIL names of the last
 7 days (§19) with one-click add and a DNSViz link: not every SERVFAIL is DNSSEC.
 
+### 6.11 EDNS Client Subnet
+
+Per upstream `ecs` renders `useClientSubnet = true`: dnsdist adds the client address,
+truncated by `setECSSourcePrefixV4/V6` (`ecs_prefix_v4/v6`, 0 = 24 / 56), unless the query
+already carries ECS. Only upstreams that act on it benefit (Google, a recursor with ECS
+enabled towards authoritative servers; Cloudflare ignores ECS), so it is off by default.
+With any ECS upstream the packet cache gets `parseECS = true`: answers are cached per
+subnet, and scope-0 answers (not subnet specific) once for everyone (zero-scope), which
+keeps the hit rate up. `setECSOverride(true)` replaces any ECS a client sent (no spoofed or
+internal subnets passed on), and clients from private / CGNAT / loopback / link-local / ULA
+space get an empty `/0` (`SetECSPrefixLengthAction(0, 0)`), so their addresses never leave
+the node. Specs without these fields decode to ECS off.
+A local resolver from `install.sh --with-unbound|--with-recursor --with-ecs` passes it on to
+authoritative servers (§13): turn `ecs` on for its upstream `127.0.0.1:5335`.
+
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 
 ### 7.1 Sources
@@ -875,6 +892,18 @@ POSIX sh, idempotent, Debian 12/13 and Ubuntu 22.04/24.04, amd64/arm64:
    never binds :53; `unbound-resolvconf` masked). Tuned from the host: a thread per core (max 8),
    rrset cache RAM/16 (64m–1g), prefetch, serve-expired (RFC 8767), aggressive NSEC, IPv6
    only when a ping over IPv6 reaches the internet (a route alone can be a dead uplink). Profiles use it as upstream `127.0.0.1:5335`.
+   `--with-recursor` installs PowerDNS Recursor instead (`repo.powerdns.com`, `rec-54` pinned like
+   dnsdist; config in `/etc/powerdns/recursor.d/dnsjos.yml` before the package): same port, a
+   thread per core (max 8), record cache ~250 entries/MB RAM (200k–2M, packet cache half),
+   `dnssec.validation: validate`, refresh at 10 % TTL left, serve-stale up to a day, outgoing
+   IPv6 under the same ping check. The two are exclusive; the installer refuses while the other
+   one runs. `--with-ecs` makes either pass the ECS dnsdist adds (§6.11) to every authoritative
+   server, as public resolvers do (Unbound: `subnetcache` + `send-client-subnet: 0.0.0.0/0,
+   ::0/0`; Recursor: `use_incoming_edns_subnet` + `edns_subnet_allow_list: 0.0.0.0/0, ::/0`),
+   or with `--ecs-zones LIST` only to those zones' name servers (`client-subnet-zone` /
+   allow-list domains). Queries without ECS send none; for dnsdist's empty `/0` Recursor
+   sends the node's own IPv4 (`ecs.scope_zero_address`), not 127.0.0.1. Unbound also gets
+   `extended-statistics` for `unbound-control stats` / unbound_exporter.
    Kernel/NIC tuning (`/etc/sysctl.d/91-dnsjos-tuning.conf`, never lowering a value already
    raised): backlog ≥ 16384, source ports 10000–65535 (unless a TCP service listens in
    10000–32767), swappiness 10, fq + bbr, THP madvise, `performance` governor on bare metal.
