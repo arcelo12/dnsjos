@@ -128,6 +128,27 @@ func TestGolden(t *testing.T) {
 	}
 }
 
+func TestIPAliasLargePacketUsesSlices(t *testing.T) {
+	spec := api.DefaultConfigSpec()
+	spec.Blocking.Enabled, spec.Abuse.Enabled, spec.CGK.Enabled, spec.Analytics.Enabled = false, false, false, false
+	spec.IPAlias = api.IPAlias{Enabled: true, Rules: []api.IPAliasRule{{
+		Name: "cf", MatchPools: []string{"104.16.0.0/13"}, Targets: []string{"172.64.52.159"},
+	}}}
+	files, err := Render(spec, testRT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lua := string(files[FileIPAlias])
+	if strings.Contains(lua, "local bytes = { p:byte(1, #p) }") {
+		t.Fatal("ip-alias still expands the entire packet with string.byte")
+	}
+	for _, want := range []string{"p:sub(last, rd - 1)", "p:sub(last)", "local out, last, nt"} {
+		if !strings.Contains(lua, want) {
+			t.Fatalf("ip-alias large-packet splice missing %q", want)
+		}
+	}
+}
+
 func TestModulesFollowSpec(t *testing.T) {
 	spec := api.DefaultConfigSpec()
 	spec.Blocking.Enabled, spec.Abuse.Enabled, spec.CGK.Enabled, spec.Analytics.Enabled = false, false, false, false
