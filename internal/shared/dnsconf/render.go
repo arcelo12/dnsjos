@@ -183,7 +183,13 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 			luaString(ap), name, s.Weight, s.Order, s.Sockets, spec.Upstreams.HealthCheckIntervalS, useECS)
 	}
 	if ecs {
-		w("setECSSourcePrefixV4(%d)\nsetECSSourcePrefixV6(%d)\n", cmp.Or(spec.Upstreams.ECSPrefixV4, 24), cmp.Or(spec.Upstreams.ECSPrefixV6, 56))
+		// Replace any ECS the client sent (spoofed or internal subnets), and give clients
+		// from private / CGNAT space an empty /0 so their addresses never leave the node.
+		w("setECSSourcePrefixV4(%d)\nsetECSSourcePrefixV6(%d)\nsetECSOverride(true)\n",
+			cmp.Or(spec.Upstreams.ECSPrefixV4, 24), cmp.Or(spec.Upstreams.ECSPrefixV6, 56))
+		w("local ecsPrivate = newNMG()\nfor _, m in ipairs(%s) do ecsPrivate:addMask(m) end\n"+
+			"addAction(NetmaskGroupRule(ecsPrivate, true), SetECSPrefixLengthAction(0, 0), {name = \"dnsjos-ecs-private\"})\n",
+			luaList(ecsPrivateNets))
 	}
 	if !slices.Contains(api.Policies, spec.Upstreams.Policy) {
 		return nil, fmt.Errorf("upstreams.policy: unknown %q", spec.Upstreams.Policy)
@@ -268,6 +274,13 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 	}
 	files[FileConf] = []byte(c.String())
 	return files, nil
+}
+
+// ecsPrivateNets are client ranges whose subnet is never sent as ECS (RFC 1918, CGNAT,
+// loopback, link-local, ULA): they say nothing useful about location and are internal.
+var ecsPrivateNets = []string{
+	"10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+	"::1/128", "fc00::/7", "fe80::/10",
 }
 
 // latencyPolicy is whashed (same name → same upstream, for upstream cache locality) with

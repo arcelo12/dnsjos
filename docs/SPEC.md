@@ -547,7 +547,10 @@ already carries ECS. Only upstreams that act on it benefit (Google, a recursor w
 enabled towards authoritative servers; Cloudflare ignores ECS), so it is off by default.
 With any ECS upstream the packet cache gets `parseECS = true`: answers are cached per
 subnet, and scope-0 answers (not subnet specific) once for everyone (zero-scope), which
-keeps the hit rate up. Specs without these fields decode to ECS off.
+keeps the hit rate up. `setECSOverride(true)` replaces any ECS a client sent (no spoofed or
+internal subnets passed on), and clients from private / CGNAT / loopback / link-local / ULA
+space get an empty `/0` (`SetECSPrefixLengthAction(0, 0)`), so their addresses never leave
+the node. Specs without these fields decode to ECS off.
 A local resolver from `install.sh --with-unbound|--with-recursor --with-ecs` passes it on to
 authoritative servers (§13): turn `ecs` on for its upstream `127.0.0.1:5335`.
 

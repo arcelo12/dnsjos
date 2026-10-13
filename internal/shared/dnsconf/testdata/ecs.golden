@@ -18,4 +18,8 @@ newServer({address = "8.8.8.8:53", name = "google", weight = 1, order = 1, socke
 newServer({address = "1.1.1.1:53", name = "cloudflare", weight = 1, order = 2, sockets = 4, checkInterval = 1, pool = ""})
 setECSSourcePrefixV4(20)
 setECSSourcePrefixV6(48)
+setECSOverride(true)
+local ecsPrivate = newNMG()
+for _, m in ipairs({"10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"}) do ecsPrivate:addMask(m) end
+addAction(NetmaskGroupRule(ecsPrivate, true), SetECSPrefixLengthAction(0, 0), {name = "dnsjos-ecs-private"})
 setServerPolicy(firstAvailable)
