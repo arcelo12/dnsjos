@@ -4,6 +4,7 @@ package api
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -61,6 +62,15 @@ type Upstreams struct {
 	// PolicyLatencyAware only: upstreams answering faster than this count as equally fast
 	// (0 = 20 ms), so normal jitter does not reshuffle which upstream serves a name.
 	LatencyFloorMs int `json:"latency_floor_ms"`
+	// EDNS Client Subnet sent to upstreams with ECS set (SPEC §6.11): the client address
+	// truncated to these prefix lengths (0 = 24 / 56, dnsdist's defaults).
+	ECSPrefixV4 int `json:"ecs_prefix_v4"`
+	ECSPrefixV6 int `json:"ecs_prefix_v6"`
+}
+
+// AnyECS reports whether any upstream receives EDNS Client Subnet.
+func (u Upstreams) AnyECS() bool {
+	return slices.ContainsFunc(u.Servers, func(s Upstream) bool { return s.ECS })
 }
 
 type Upstream struct {
@@ -69,6 +79,9 @@ type Upstream struct {
 	Order   int    `json:"order"`
 	Sockets int    `json:"sockets"`
 	Name    string `json:"name"`
+	// ECS adds the client's subnet to queries sent here (useClientSubnet). Only useful for
+	// upstreams that act on it: Google, Unbound/Recursor with ECS on; Cloudflare ignores it.
+	ECS bool `json:"ecs"`
 }
 
 type Cache struct {

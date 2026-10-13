@@ -61,6 +61,15 @@ func TestGolden(t *testing.T) {
 			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
 			s.DNSSEC.Exclude = []string{"go.id", "Broken.Example.", "broken.example"}
 		},
+		"ecs": func(s *api.ConfigSpec) {
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.Upstreams.Policy = "firstAvailable"
+			s.Upstreams.ECSPrefixV4, s.Upstreams.ECSPrefixV6 = 20, 48
+			s.Upstreams.Servers = []api.Upstream{
+				{Address: "8.8.8.8:53", Weight: 1, Order: 1, Sockets: 4, Name: "google", ECS: true},
+				{Address: "1.1.1.1:53", Weight: 1, Order: 2, Sockets: 4, Name: "cloudflare"}, // ignores ECS
+			}
+		},
 		"analytics_sampled": func(s *api.ConfigSpec) {
 			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled = false, false, false
 			s.Analytics.SampleRate, s.Analytics.StreamAddr = 10, "[::1]:6101"

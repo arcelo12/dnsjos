@@ -185,9 +185,11 @@ panel on save and in the agent before rendering.
   "acl": ["10.0.0.0/8", "100.64.0.0/10", "…"],            // client allowlist
   "upstreams": {
     "policy": "whashedLatency",     // whashed | whashedLatency | wrandom | leastOutstanding | roundrobin | firstAvailable
-    "servers": [ {"address": "192.0.2.53:53", "weight": 40, "order": 1, "sockets": 4, "name": "resolver1"} ],
+    "servers": [ {"address": "192.0.2.53:53", "weight": 40, "order": 1, "sockets": 4, "name": "resolver1",
+                  "ecs": false} ],  // §6.11: send EDNS Client Subnet to this upstream
     "health_check_interval_s": 1,
-    "latency_floor_ms": 0           // whashedLatency: faster than this = equally fast (0 = 20 ms), 0..10000
+    "latency_floor_ms": 0,          // whashedLatency: faster than this = equally fast (0 = 20 ms), 0..10000
+    "ecs_prefix_v4": 0, "ecs_prefix_v6": 0  // §6.11: 0 = 24 / 56
   },
   "cache": {"enabled": true, "max_entries": 500000, "min_ttl": 0, "max_ttl": 86400, "stale_ttl": 3600},
   "blocking": {
@@ -536,6 +538,18 @@ dnsdist does not validate DNSSEC; the upstreams do (Unbound from `install.sh
 CD is set before the packet cache lookup and is part of the cache key, so validated and
 unvalidated answers never mix. The profile editor lists the top SERVFAIL names of the last
 7 days (§19) with one-click add and a DNSViz link: not every SERVFAIL is DNSSEC.
+
+### 6.11 EDNS Client Subnet
+
+Per upstream `ecs` renders `useClientSubnet = true`: dnsdist adds the client address,
+truncated by `setECSSourcePrefixV4/V6` (`ecs_prefix_v4/v6`, 0 = 24 / 56), unless the query
+already carries ECS. Only upstreams that act on it benefit (Google, a recursor with ECS
+enabled towards authoritative servers; Cloudflare ignores ECS), so it is off by default.
+With any ECS upstream the packet cache gets `parseECS = true`: answers are cached per
+subnet, and scope-0 answers (not subnet specific) once for everyone (zero-scope), which
+keeps the hit rate up. Specs without these fields decode to ECS off.
+A local resolver from `install.sh --with-unbound|--with-recursor --with-ecs` passes it on to
+authoritative servers (§13): turn `ecs` on for its upstream `127.0.0.1:5335`.
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 

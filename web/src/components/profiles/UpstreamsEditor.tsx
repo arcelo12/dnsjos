@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Slider } from '@/components/ui/slider'
+import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { POLICY_INFO } from '@/lib/api/profiles'
 import { POLICIES, type ServerPolicy, type Upstream, type Upstreams } from '@/lib/api/types'
@@ -137,6 +138,9 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
                 <TableHead className="w-20 text-right">Share</TableHead>
                 <TableHead className="w-24">Order</TableHead>
                 <TableHead className="w-24">Sockets</TableHead>
+                <TableHead className="w-16" title="Send the client's subnet (EDNS Client Subnet) to this upstream">
+                  ECS
+                </TableHead>
                 {!ro && (
                   <TableHead className="w-10">
                     <span className="sr-only">Remove</span>
@@ -224,6 +228,15 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
                         className="h-8 min-w-14 tabular"
                       />
                     </Cell>
+                    <TableCell className="align-top">
+                      <Switch
+                        className="mt-1.5"
+                        checked={!!u.ecs}
+                        disabled={ro}
+                        aria-label={`Send client subnet to ${u.name || u.address || 'this upstream'}`}
+                        onCheckedChange={(ecs) => patch(i, { ecs })}
+                      />
+                    </TableCell>
                     {!ro && (
                       <TableCell className="align-top">
                         <Button
@@ -243,7 +256,7 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
               })}
               {servers.length === 0 && (
                 <TableRow className="hover:bg-transparent">
-                  <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={8} className="py-8 text-center text-sm text-muted-foreground">
                     No upstreams — dnsdist needs at least one.
                   </TableCell>
                 </TableRow>
@@ -255,7 +268,8 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
         <p className="text-xs text-muted-foreground">
           Order: lower is preferred by <span className="font-mono">firstAvailable</span> and as a tie-breaker by{' '}
           <span className="font-mono">leastOutstanding</span>. Sockets: UDP sockets per upstream (more spreads load across
-          CPU cores).
+          CPU cores). ECS: send each client's subnet so CDNs answer for the client's location, not the
+          node's — only upstreams that use it benefit (Google, a recursor with ECS on; Cloudflare ignores it).
         </p>
         {!ro && (
           <Button type="button" variant="outline" className="w-fit" onClick={addServer}>
@@ -263,6 +277,36 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
           </Button>
         )}
       </Section>
+
+      {servers.some((u) => u.ecs) && (
+        <Section
+          title="Client subnet (ECS)"
+          description="The client address is truncated to these prefix lengths before it leaves the node. Shorter prefixes share less of the client's address and keep the cache hit rate higher; answers that are not subnet specific are still cached once for everyone."
+        >
+          <div className="grid gap-4 sm:grid-cols-2">
+            <NumField
+              label="IPv4 prefix"
+              path="upstreams.ecs_prefix_v4"
+              value={value.ecs_prefix_v4 ?? 0}
+              onChange={(v) => onChange({ ...value, ecs_prefix_v4: v })}
+              min={0}
+              max={32}
+              unit="bits"
+              help="0 = /24 (dnsdist's default)."
+            />
+            <NumField
+              label="IPv6 prefix"
+              path="upstreams.ecs_prefix_v6"
+              value={value.ecs_prefix_v6 ?? 0}
+              onChange={(v) => onChange({ ...value, ecs_prefix_v6: v })}
+              min={0}
+              max={128}
+              unit="bits"
+              help="0 = /56 (dnsdist's default)."
+            />
+          </div>
+        </Section>
+      )}
     </div>
   )
 }

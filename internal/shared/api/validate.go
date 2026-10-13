@@ -106,6 +106,8 @@ func (s ConfigSpec) Validate() error {
 	}
 	between("upstreams.health_check_interval_s", u.HealthCheckIntervalS, 1, 3600)
 	between("upstreams.latency_floor_ms", u.LatencyFloorMs, 0, 10_000)
+	between("upstreams.ecs_prefix_v4", u.ECSPrefixV4, 0, 32)
+	between("upstreams.ecs_prefix_v6", u.ECSPrefixV6, 0, 128)
 
 	c := s.Cache
 	if c.Enabled {
