@@ -127,31 +127,11 @@ func buildSize(b *api.BlocklistBuild) int64 {
 // currentBuildForNode is currentBuild for a node: it resolves the node's profile first and
 // serves that profile's build, falling back to the global one.
 func currentBuildForNode(ctx context.Context, q db.Querier, nodeID string) (sha string, size int64, err error) {
-	profileID, err := nodeProfileID(ctx, q, nodeID)
+	profileID, err := blocklist.NodeProfileID(ctx, q, nodeID)
 	if err != nil {
 		return "", 0, err
 	}
 	return currentBuild(ctx, q, profileID)
-}
-
-// nodeProfileID resolves the profile whose blocklist a node should be served: the node's own
-// profile, or the "default" profile when it is unset. It returns "" when that profile has no
-// config row at all, so the caller falls back to the global build.
-func nodeProfileID(ctx context.Context, q db.Querier, nodeID string) (string, error) {
-	var id *string
-	err := q.QueryRow(ctx, `SELECT p.id::text FROM nodes n
-		JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
-		WHERE n.id = $1`, nodeID).Scan(&id)
-	if db.IsNotFound(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	if id == nil {
-		return "", nil
-	}
-	return *id, nil
 }
 
 // profileSpec returns the newest published spec of a profile (nil id = "default"), or

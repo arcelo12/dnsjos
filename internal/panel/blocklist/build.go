@@ -590,7 +590,10 @@ func (s *Service) fingerprintPath(profileID string) string {
 
 // prune keeps the artifacts still referenced by any scope: the last keepBuilds distinct ok
 // builds per scope, and the newest ok build of every scope (a profile's fallback is the
-// global artifact, which must outlive the global build's own keep window).
+// global artifact, which must outlive the global build's own keep window). The second
+// branch is not redundant: the first ranks each artifact by max(finished_at) and max(id)
+// taken independently, so with equal finish times the artifact Current() serves can rank
+// below keepBuilds; the DISTINCT ON branch keeps it whatever the ranking says.
 func (s *Service) prune(ctx context.Context) {
 	rows, _ := s.d.Pool.Query(ctx, `
 		(SELECT sha256 FROM (

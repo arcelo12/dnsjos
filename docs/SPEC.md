@@ -628,7 +628,7 @@ expanded only if ≤ /24 (≤ 256 keys), larger ones are skipped and counted.
 own newest `ok` build, or the global build when the profile has none of its own (`ETag:
 "<sha256>"`, `X-Dnsjos-Sha256`, `Content-Length`), 304 on matching `If-None-Match`. Served
 with `http.ServeContent` (supports Range, so agents can resume). A `?profile_id=` query
-parameter overrides the node's own scope (empty = global).
+parameter overrides the node's own scope (empty = global; only its presence tells that apart from no override). On every blocklist endpoint a `profile_id` that is not a uuid is a 400.
 
 ---
 
