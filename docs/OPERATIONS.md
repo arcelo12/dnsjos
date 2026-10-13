@@ -13,10 +13,16 @@ The installer installs dnsdist 2.0 from repo.powerdns.com only when dnsdist is *
 installed; an existing dnsdist is never upgraded. Add `--no-start` to review the first
 config before the agent touches dnsdist (see `plan` below).
 
-Add `--with-unbound` (or tick it in the Add node dialog) to also install Unbound as a
-local recursive, DNSSEC-validating resolver on `127.0.0.1:5335`. dnsdist keeps filtering,
-policies and routing; set the profile upstream to `127.0.0.1:5335` (weight 1) instead of
-public resolvers. Re-running the installer with the flag on an existing node is safe.
+Add `--with-unbound` or `--with-recursor` (or pick one in the Add node dialog) to also
+install a local recursive, DNSSEC-validating resolver on `127.0.0.1:5335`: Unbound (light,
+distro package) or PowerDNS Recursor (same vendor and repo as dnsdist, finer ECS control).
+dnsdist keeps filtering, policies and routing. In the node's profile or overrides, use policy
+`firstAvailable` with `127.0.0.1:5335` at order 1 and a public resolver at order 2 as fallback
+(other policies ignore `order`). Re-running the installer with the flag is safe.
+
+For nodes far from their customers (another country), add `--with-ecs` and turn **ECS** on
+for `127.0.0.1:5335` in the profile's upstreams: the resolver then passes each client's
+subnet (/24, /56) to authoritative servers, so CDNs answer for the customer's location.
 
 The installer also tunes the kernel and NIC for DNS (`/etc/sysctl.d/91-dnsjos-tuning.conf`,
 `dnsjos-nic-tuning.service`, `/etc/tmpfiles.d/dnsjos-tuning.conf`); it never lowers a value

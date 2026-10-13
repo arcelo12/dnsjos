@@ -889,6 +889,15 @@ POSIX sh, idempotent, Debian 12/13 and Ubuntu 22.04/24.04, amd64/arm64:
    never binds :53; `unbound-resolvconf` masked). Tuned from the host: a thread per core (max 8),
    rrset cache RAM/16 (64m–1g), prefetch, serve-expired (RFC 8767), aggressive NSEC, IPv6
    only when a ping over IPv6 reaches the internet (a route alone can be a dead uplink). Profiles use it as upstream `127.0.0.1:5335`.
+   `--with-recursor` installs PowerDNS Recursor instead (`repo.powerdns.com`, `rec-54` pinned like
+   dnsdist; config in `/etc/powerdns/recursor.d/dnsjos.yml` before the package): same port, a
+   thread per core (max 8), record cache ~250 entries/MB RAM (200k–2M, packet cache half),
+   `dnssec.validation: validate`, refresh at 10 % TTL left, serve-stale up to a day, outgoing
+   IPv6 under the same ping check. The two are exclusive; the installer refuses while the other
+   one runs. `--with-ecs` makes either pass the ECS dnsdist adds (§6.11) to every authoritative
+   server (Unbound: `subnetcache` + `send-client-subnet: 0.0.0.0/0, ::0/0`; Recursor:
+   `use_incoming_edns_subnet` + `edns_subnet_allow_list: 0.0.0.0/0, ::/0`); queries without
+   ECS send none.
    Kernel/NIC tuning (`/etc/sysctl.d/91-dnsjos-tuning.conf`, never lowering a value already
    raised): backlog ≥ 16384, source ports 10000–65535 (unless a TCP service listens in
    10000–32767), swappiness 10, fq + bbr, THP madvise, `performance` governor on bare metal.
