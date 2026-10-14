@@ -236,11 +236,11 @@ sequenceDiagram
 | | |
 |---|---|
 | Panel memory in production | **~50 MB** RSS |
-| Agent memory per node | **22–29 MB** RSS |
+| Agent memory per node | **23–97 MB** RSS |
 | Agent binary | **~10 MB**, static, amd64 + arm64 |
-| dnsdist interruption per applied change | **~1 s** on one node at a time |
-| Blocklist download, 8 streams vs 1 | **3.0 s vs 7.9 s** median |
-| Allowlist entry to every node | **≤ 15 s**, no restart |
+| dnsdist interruption per applied change | **~0.8 s** median (max 1.1 s), one node at a time |
+| Blocklist download (220 MB), 8 streams vs 1 | **2.2 s vs 2.8 s** median |
+| Allowlist entry to every node | **2–6 s** measured (≤ 15 s worst case), no restart |
 
 ## 🚀 Quick start
 
