@@ -35,6 +35,7 @@ func Register(r *app.Router, d *app.Deps) {
 		error = 'interrupted (panel restarted)' WHERE status = 'running'`)
 	// The interval setting is re-read on every tick.
 	d.Jobs.Every("blocklist-build", time.Minute, s.tick)
+	d.Jobs.Every("rpz-sync", time.Minute, s.rpzSyncAll)
 	d.Jobs.Every("allowlist-purge", time.Hour, s.purgeAllow)
 }
 
@@ -49,6 +50,11 @@ func (s *Service) routes(r *app.Router) {
 	r.Viewer("GET /api/v1/blocklist/current", s.current)
 	r.Viewer("GET /api/v1/blocklist/profiles", s.listProfiles)
 	r.Viewer("GET /api/v1/blocklist/lookup", s.lookup)
+	r.Viewer("GET /api/v1/rpz/upstreams", s.listRPZUpstreams)
+	r.Admin("POST /api/v1/rpz/upstreams", s.createRPZUpstream)
+	r.Admin("PATCH /api/v1/rpz/upstreams/{id}", s.patchRPZUpstream)
+	r.Admin("DELETE /api/v1/rpz/upstreams/{id}", s.deleteRPZUpstream)
+	r.Admin("POST /api/v1/rpz/upstreams/{id}/sync", s.syncRPZUpstream)
 	r.Agent("GET /agent/v1/blocklist", s.serveCDB)
 	r.Viewer("GET /api/v1/allowlist", s.listAllow)
 	r.Admin("POST /api/v1/allowlist", s.createAllow)
