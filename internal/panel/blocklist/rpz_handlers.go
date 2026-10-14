@@ -153,10 +153,30 @@ func (s *Service) patchRPZUpstream(w http.ResponseWriter, r *http.Request) {
 		}
 		req.IntervalS = &interval
 	}
-	// TSIG is set as a pair: a non-nil secret requires key+secret, a non-nil key with an
-	// empty secret clears TSIG. tsig_secret:null is ignored (write-only field).
-	if req.TSIGSecret != nil && req.TSIGKey == nil {
+	// TSIG is a pair operation: to set or change it, send both tsig_key and tsig_secret; to
+	// clear it, send tsig_key:"" alone (an empty secret alongside is ignored). Any lone
+	// non-empty field, or an empty key paired with a non-empty secret, is a 400: either
+	// would leave the upstream signing with a mismatched key/secret and fail every transfer.
+	// tsig_secret:null alone is ignored (write-only field).
+	keySet, secretSet := req.TSIGKey != nil, req.TSIGSecret != nil
+	switch {
+	case keySet && strings.TrimSpace(*req.TSIGKey) == "" && secretSet && strings.TrimSpace(*req.TSIGSecret) != "":
+		// Empty key with a non-empty secret is a client error: reject it rather than
+		// silently clearing TSIG (a typo'd key must not disable signing).
+		httpx.BadRequest(w, "tsig_key must not be empty when tsig_secret is set (or send tsig_key:\"\" alone to clear)")
+		return
+	case keySet && strings.TrimSpace(*req.TSIGKey) == "":
+		// Clearing TSIG: store "" for both, ignoring any empty secret sent alongside.
+		empty := ""
+		req.TSIGKey, req.TSIGSecret = &empty, &empty
+	case keySet && !secretSet:
+		httpx.BadRequest(w, "tsig_secret is required when setting tsig_key (or send tsig_key:\"\" to clear)")
+		return
+	case secretSet && !keySet:
 		httpx.BadRequest(w, "tsig_key is required with tsig_secret")
+		return
+	case keySet && secretSet && strings.TrimSpace(*req.TSIGSecret) == "":
+		httpx.BadRequest(w, "tsig_secret must not be empty when setting tsig_key (or send tsig_key:\"\" to clear)")
 		return
 	}
 	var out api.RPZUpstream
