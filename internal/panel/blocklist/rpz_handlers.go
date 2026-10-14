@@ -121,8 +121,20 @@ func (s *Service) createRPZUpstream(w http.ResponseWriter, r *http.Request) {
 			req.Name, req.Upstream, zone, req.TSIGKey, req.TSIGSecret, req.IntervalS, srcID).Scan(&out.ID); err != nil {
 			return err
 		}
-		return audit.Record(r, tx, "blocklist.rpz.create", "rpz_upstream", out.ID,
-			map[string]any{"name": req.Name, "upstream": req.Upstream, "zone": zone, "profile_ids": profiles})
+		if err := audit.Record(r, tx, "blocklist.rpz.create", "rpz_upstream", out.ID,
+			map[string]any{"name": req.Name, "upstream": req.Upstream, "zone": zone, "profile_ids": profiles}); err != nil {
+			return err
+		}
+		// Read the row back inside the transaction: with a load-balanced pool (pgpool in
+		// front of a primary and standbys) a post-commit read on a fresh connection can
+		// land on a standby that has not replayed the insert yet, which surfaced as a
+		// missing row (404) even though the create committed.
+		u, err := scanRPZFull(tx.QueryRow(r.Context(), "SELECT "+rpzFullCols+rpzFrom+" WHERE u.id = $1", out.ID))
+		if err != nil {
+			return err
+		}
+		out = u
+		return nil
 	})
 	if db.IsForeignKeyViolation(err) || db.IsInvalidInput(err) {
 		httpx.BadRequest(w, "profile_id: no such profile")
@@ -130,12 +142,6 @@ func (s *Service) createRPZUpstream(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
-	}
-	if u, err := scanRPZFull(s.d.Pool.QueryRow(r.Context(), "SELECT "+rpzFullCols+rpzFrom+" WHERE u.id = $1", out.ID)); err != nil {
-		httpx.WriteDBError(w, r, err)
-		return
-	} else {
-		out = u
 	}
 	httpx.WriteJSON(w, http.StatusCreated, out)
 }
@@ -243,7 +249,17 @@ func (s *Service) patchRPZUpstream(w http.ResponseWriter, r *http.Request) {
 		if err := syncUpstreamName(tx, r, out.ID); err != nil {
 			return err
 		}
-		return audit.Record(r, tx, "blocklist.rpz.update", "rpz_upstream", id, req)
+		if err := audit.Record(r, tx, "blocklist.rpz.update", "rpz_upstream", id, req); err != nil {
+			return err
+		}
+		// Read the row back inside the transaction (see createRPZUpstream): a post-commit
+		// read on a fresh connection can miss the update on a lagging standby.
+		u, err := scanRPZFull(tx.QueryRow(r.Context(), "SELECT "+rpzFullCols+rpzFrom+" WHERE u.id = $1", out.ID))
+		if err != nil {
+			return err
+		}
+		out = u
+		return nil
 	})
 	if db.IsNotFound(err) {
 		httpx.NotFound(w)
@@ -254,12 +270,6 @@ func (s *Service) patchRPZUpstream(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
-	}
-	if u, err := scanRPZFull(s.d.Pool.QueryRow(r.Context(), "SELECT "+rpzFullCols+rpzFrom+" WHERE u.id = $1", out.ID)); err != nil {
-		httpx.WriteDBError(w, r, err)
-		return
-	} else {
-		out = u
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
