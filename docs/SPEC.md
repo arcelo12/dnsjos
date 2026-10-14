@@ -701,6 +701,38 @@ seconds, fleet-wide, without a build or a dnsdist restart:
 * The blocklist lookup reports `allowed` and the matching entry, so the UI can show
   "blocked by the list but allowed".
 
+### 7.7 RPZ slave (in-panel AXFR/IXFR pull)
+
+The regulator's RPZ master publishes the blocklist as a DNS zone. Instead of running a
+separate relay host, the panel itself is an RPZ secondary: it pulls the zone from the
+master over AXFR/IXFR and writes the transferred domains into a normal blocklist source,
+so the rest of the pipeline (§7.2 build → per-profile CDB → §7.4 serving) is unchanged.
+Only the panel needs the master's allow-IP and TSIG key; nodes keep downloading the CDB
+from the panel and never talk to the master.
+
+* A **rpz upstream** (`rpz_upstreams`) is one master endpoint: `name`, `upstream`
+  (`host:port`), `zone` (FQDN), optional `tsig_key`/`tsig_secret` (base64, HMAC-SHA256),
+  and an `interval_s` (60–86400, default 900). An upstream always owns exactly one
+  blocklist source of `kind = rpz_domains`: creating an upstream creates the paired source
+  in the same transaction, and its `profile_id` scopes which build sees it. Deleting the
+  upstream deletes the source.
+* CRUD is `GET/POST /api/v1/rpz/upstreams`, `PATCH/DELETE /api/v1/rpz/upstreams/{id}`, and
+  `POST /api/v1/rpz/upstreams/{id}/sync` forces one transfer now. The TSIG secret is
+  write-only: `api.RPZUpstream` exposes only `has_tsig`. `tsig_key`/
+  `tsig_secret` are set as a pair; sending `tsig_key: ""` clears TSIG.
+* The **`rpz-sync` job** (every minute) visits each upstream whose source is still enabled
+  and whose interval has elapsed. It queries the zone SOA; when the serial equals the last
+  transfer it does nothing, otherwise it does a full **AXFR** (no local serial yet) or an
+  **IXFR** from the stored serial and atomically rewrites `blocklist_sources.content`
+  (`serial`, `total_domains`, `last_sync_at` updated; a failure is recorded in
+  `last_error` without stopping the other upstreams). A transfer is capped at 10 M records.
+* Blocked domains are the owners of every **CNAME/A/AAAA** record inside the zone, minus the
+  apex, normalized by the same rules as §7.2 (so `sub.blocked.example` in the zone becomes
+  the domain `sub.blocked.example`). Once written to the source's content, a build treats
+  the source exactly like a manual list.
+* A manual `POST …/sync` returns the refreshed `api.RPZUpstream`, or 502 `upstream_error`
+  with the transfer failure (also stored in `last_error`).
+
 ## 8. Agent protocol (`/agent/v1`, bearer = node token)
 
 All agent requests carry `Authorization: Bearer <node_token>` and

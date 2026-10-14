@@ -40,6 +40,7 @@ import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, shortSha } from '@/lib/f
 import { cn, looksLikeIP } from '@/lib/utils'
 
 import { AllowDialog, AllowlistCard } from './Allowlist'
+import { RpzCard } from './Rpz'
 
 const KINDS: Record<BlocklistSourceKind, string> = {
   trustpositif_domains: 'TrustPositif domains',
@@ -48,9 +49,11 @@ const KINDS: Record<BlocklistSourceKind, string> = {
   url_ips: 'URL — IPs',
   manual_domains: 'Manual domains',
   manual_ips: 'Manual IPs',
+  rpz_domains: 'RPZ slave',
   whitelist: 'Whitelist',
 }
 const isManual = (k: BlocklistSourceKind) => k === 'manual_domains' || k === 'manual_ips' || k === 'whitelist'
+const isSlave = (k: BlocklistSourceKind) => k === 'rpz_domains'
 
 /** Sentinel for "all scopes". The global scope is a real empty string, so the selector needs
  * a distinct sentinel for it too (Radix Select forbids an empty item value). */
@@ -151,6 +154,7 @@ export default function BlocklistPage() {
         onSelect={setSelected}
       />
       <AllowlistCard />
+      <RpzCard />
       <SourcesCard scope={scope} profile={profile} />
       <Card>
         <CardHeader className="flex flex-row items-start justify-between gap-2">
@@ -635,7 +639,7 @@ function SourcesCard({ scope, profile }: { scope: string | undefined; profile: B
             {scope !== undefined && !ownSources(s, scope) && <Badge variant="secondary">inherited from global</Badge>}
           </div>
           <div className="max-w-80 truncate text-xs text-muted-foreground" title={s.url}>
-            {isManual(s.kind) ? 'Manual list' : s.url}
+            {isManual(s.kind) ? 'Manual list' : isSlave(s.kind) ? 'Pulled from an RPZ master' : s.url}
           </div>
         </div>
       ),
@@ -827,11 +831,13 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {Object.entries(KINDS).map(([k, label]) => (
-                  <SelectItem key={k} value={k}>
-                    {label}
-                  </SelectItem>
-                ))}
+                {Object.entries(KINDS)
+                  .filter(([k]) => !isSlave(k as BlocklistSourceKind))
+                  .map(([k, label]) => (
+                    <SelectItem key={k} value={k}>
+                      {label}
+                    </SelectItem>
+                  ))}
               </SelectContent>
             </Select>
           </Field>
