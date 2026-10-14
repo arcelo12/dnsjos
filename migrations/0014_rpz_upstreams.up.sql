@@ -19,8 +19,8 @@ CREATE TABLE rpz_upstreams (
     updated_at    timestamptz NOT NULL DEFAULT now()
 );
 
--- The seeded default group would make this idempotent on a re-run; nothing else needed.
--- Extend the source kind check to allow the RPZ slave's source (drop + add is idempotent).
+-- The RPZ slave writes its transferred domains into a source of kind rpz_domains, so the
+-- source kind check must allow it. Fresh installs get the kind from 0001.
 ALTER TABLE blocklist_sources DROP CONSTRAINT IF EXISTS blocklist_sources_kind_check;
 ALTER TABLE blocklist_sources ADD CONSTRAINT blocklist_sources_kind_check CHECK (kind IN (
     'trustpositif_domains', 'trustpositif_ips', 'url_domains', 'url_ips',
