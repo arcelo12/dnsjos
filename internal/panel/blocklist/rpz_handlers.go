@@ -24,27 +24,39 @@ func dnsZone(z string) string { return dns.Fqdn(z) }
 
 // rpzColsFull is rpzCols plus the presentation fields (created/updated, profile name) a
 // CRUD read returns. The sync job uses the narrower rpzCols.
-const rpzFullCols = rpzCols + `, coalesce((SELECT name FROM config_profiles WHERE id = s.profile_id), ''),
+const rpzFullCols = rpzCols + `,
+	array(SELECT p.name FROM blocklist_source_profiles sp JOIN config_profiles p ON p.id = sp.profile_id WHERE sp.source_id = s.id ORDER BY sp.profile_id),
 	u.last_sync_at, u.created_at, u.updated_at`
 
 func scanRPZFull(row pgx.Row) (api.RPZUpstream, error) {
 	var (
 		u       rpzUpstream
-		prof    string
+		pnames  []string
 		last    *time.Time
 		cre, u2 time.Time
 	)
 	err := row.Scan(&u.ID, &u.Name, &u.Upstream, &u.Zone, &u.TSIGKey, &u.TSIGSecret,
-		&u.IntervalS, &u.Serial, &u.TotalDomains, &u.LastError, &u.SourceID, &u.ProfileID,
-		&prof, &last, &cre, &u2)
+		&u.IntervalS, &u.Serial, &u.TotalDomains, &u.LastError, &u.SourceID, &u.ProfileIDs,
+		&pnames, &last, &cre, &u2)
 	if err != nil {
 		return api.RPZUpstream{}, err
+	}
+	if u.ProfileIDs == nil {
+		u.ProfileIDs = []string{}
+	}
+	if pnames == nil {
+		pnames = []string{}
+	}
+	var pid, pname string
+	if len(u.ProfileIDs) > 0 {
+		pid, pname = u.ProfileIDs[0], pnames[0]
 	}
 	return api.RPZUpstream{
 		ID: u.ID, Name: u.Name, Upstream: u.Upstream, Zone: u.Zone,
 		HasTSIG: u.TSIGKey != "", IntervalS: u.IntervalS, Serial: u.Serial,
 		TotalDomains: u.TotalDomains, LastSyncAt: last, LastError: u.LastError,
-		SourceID: u.SourceID, ProfileID: u.ProfileID, ProfileName: prof,
+		SourceID: u.SourceID, ProfileID: pid, ProfileName: pname,
+		ProfileIDs: u.ProfileIDs, ProfileNames: pnames,
 		CreatedAt: cre, UpdatedAt: u2,
 	}, nil
 }
@@ -86,7 +98,8 @@ func (s *Service) createRPZUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	req.IntervalS = interval
 	zone := dnsZone(req.Zone)
-	if err := s.checkProfile(r.Context(), req.ProfileID); err != nil {
+	profiles := createProfileIDs(req.ProfileID, req.ProfileIDs)
+	if err := s.checkProfiles(r.Context(), profiles); err != nil {
 		httpx.BadRequest(w, err.Error())
 		return
 	}
@@ -96,7 +109,10 @@ func (s *Service) createRPZUpstream(w http.ResponseWriter, r *http.Request) {
 		// kind rpz_domains carries no url; the transferred content is filled by the slave.
 		if err := tx.QueryRow(r.Context(), `INSERT INTO blocklist_sources (name, kind, url, content, enabled, profile_id)
 			VALUES ($1, $2, '', '', true, nullif($3, '')::uuid) RETURNING id`,
-			req.Name, api.SourceRPZDomains, req.ProfileID).Scan(&srcID); err != nil {
+			req.Name, api.SourceRPZDomains, firstOrEmpty(profiles)).Scan(&srcID); err != nil {
+			return err
+		}
+		if err := setSourceProfiles(r.Context(), tx, srcID, profiles); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(r.Context(), `INSERT INTO rpz_upstreams
@@ -106,7 +122,7 @@ func (s *Service) createRPZUpstream(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		return audit.Record(r, tx, "blocklist.rpz.create", "rpz_upstream", out.ID,
-			map[string]any{"name": req.Name, "upstream": req.Upstream, "zone": zone, "profile_id": req.ProfileID})
+			map[string]any{"name": req.Name, "upstream": req.Upstream, "zone": zone, "profile_ids": profiles})
 	})
 	if db.IsForeignKeyViolation(err) || db.IsInvalidInput(err) {
 		httpx.BadRequest(w, "profile_id: no such profile")
@@ -179,6 +195,21 @@ func (s *Service) patchRPZUpstream(w http.ResponseWriter, r *http.Request) {
 		httpx.BadRequest(w, "tsig_secret must not be empty when setting tsig_key (or send tsig_key:\"\" to clear)")
 		return
 	}
+	// A profile change is a request to set the exact profile set on the paired source;
+	// null leaves it unchanged. The legacy single ProfileID folds in when ProfileIDs is absent.
+	var profiles []string
+	profilesSet := false
+	if req.ProfileIDs != nil {
+		profiles, profilesSet = normProfileIDs(*req.ProfileIDs), true
+	} else if req.ProfileID != nil {
+		profiles, profilesSet = normProfileIDs([]string{*req.ProfileID}), true
+	}
+	if profilesSet {
+		if err := s.checkProfiles(r.Context(), profiles); err != nil {
+			httpx.BadRequest(w, err.Error())
+			return
+		}
+	}
 	var out api.RPZUpstream
 	err := pgx.BeginFunc(r.Context(), s.d.Pool, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(r.Context(), `UPDATE rpz_upstreams SET
@@ -194,6 +225,20 @@ func (s *Service) patchRPZUpstream(w http.ResponseWriter, r *http.Request) {
 			req.TSIGKey, req.TSIGSecret, req.IntervalS).Scan(&out.ID); err != nil {
 			return err
 		}
+		if profilesSet {
+			// Scope lives on the paired source; a scope change forces a rebuild from a clean
+			// slate (the stale content belonged to the old scope) and rewrites the join rows.
+			var srcID string
+			if err := tx.QueryRow(r.Context(), `UPDATE blocklist_sources SET
+				profile_id = nullif($2, '')::uuid, content = '', etag = '', last_modified = '', updated_at = now()
+				WHERE id = (SELECT source_id FROM rpz_upstreams WHERE id = $1) RETURNING id`,
+				id, firstOrEmpty(profiles)).Scan(&srcID); err != nil {
+				return err
+			}
+			if err := setSourceProfiles(r.Context(), tx, srcID, profiles); err != nil {
+				return err
+			}
+		}
 		// An upstream change forces a full transfer on the next sync.
 		if err := syncUpstreamName(tx, r, out.ID); err != nil {
 			return err
@@ -202,6 +247,9 @@ func (s *Service) patchRPZUpstream(w http.ResponseWriter, r *http.Request) {
 	})
 	if db.IsNotFound(err) {
 		httpx.NotFound(w)
+		return
+	} else if db.IsForeignKeyViolation(err) || db.IsInvalidInput(err) {
+		httpx.BadRequest(w, "profile_id: no such profile")
 		return
 	} else if err != nil {
 		httpx.WriteDBError(w, r, err)

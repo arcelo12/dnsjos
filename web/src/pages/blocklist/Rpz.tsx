@@ -7,6 +7,8 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { DataTable, type Column } from '@/components/DataTable'
 import { EmptyState } from '@/components/EmptyState'
 import { Field } from '@/components/ops/Field'
+import { ProfileMultiSelect } from '@/pages/blocklist/ProfileMultiSelect'
+import { profileSetLabel, sameProfiles } from '@/pages/blocklist/profiles'
 import { toastError } from '@/components/ops/toast'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
@@ -14,7 +16,6 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   useBlocklistProfiles,
   useCreateRPZUpstream,
@@ -25,9 +26,6 @@ import {
 } from '@/lib/api/client'
 import type { RPZUpstream, RPZUpstreamCreate } from '@/lib/api/types'
 import { fmtNumber } from '@/lib/format'
-
-/** Global scope sentinel: Radix Select forbids an empty item value, but "" is a real scope. */
-const GLOBAL = '__global__'
 
 /**
  * RPZ slave management (SPEC §7.7): each upstream is an RPZ master the panel pulls the
@@ -57,9 +55,13 @@ export function RpzCard() {
     },
     {
       key: 'profile',
-      header: 'Profile',
-      sortValue: (u) => u.profile_id,
-      cell: (u) => <span className={u.profile_id ? undefined : 'text-muted-foreground'}>{u.profile_name || 'Global'}</span>,
+      header: 'Profiles',
+      sortValue: (u) => u.profile_names.join(', '),
+      cell: (u) => (
+        <span className={u.profile_ids.length > 0 ? undefined : 'text-muted-foreground'}>
+          {profileSetLabel(u.profile_names)}
+        </span>
+      ),
     },
     {
       key: 'serial',
@@ -177,7 +179,7 @@ function RpzDialog({ upstream, onClose }: { upstream: RPZUpstream | null; onClos
   // TSIG secret is write-only: blank on edit means "keep the current secret".
   const [tsigKey, setTsigKey] = useState('')
   const [tsigSecret, setTsigSecret] = useState('')
-  const [profile, setProfile] = useState(upstream ? (upstream.profile_id === '' ? GLOBAL : upstream.profile_id) : GLOBAL)
+  const [profileIds, setProfileIds] = useState<string[]>(upstream ? upstream.profile_ids : [])
   const pending = create.isPending || update.isPending
 
   const submit = (e: FormEvent) => {
@@ -193,16 +195,19 @@ function RpzDialog({ upstream, onClose }: { upstream: RPZUpstream | null; onClos
     }
     const done = { onSuccess: () => { toast.success(upstream ? 'RPZ master saved' : 'RPZ master added'); onClose() }, onError: toastError }
     const tsigField = tsigKey ? { tsig_key: tsigKey, tsig_secret: tsigSecret } : {}
+    // Only send profile_ids when the set actually changed, so an unrelated edit does not
+    // needlessly wipe the source's transferred content and cache.
+    const profileChanged = upstream ? !sameProfiles(profileIds, upstream.profile_ids) : profileIds.length > 0
     if (upstream) {
       // Only send tsig_* when the admin typed a key; sending "" clears TSIG.
-      update.mutate({ id: upstream.id, patch: { name: name.trim(), upstream: host.trim(), zone: zone.trim(), interval_s: seconds, ...tsigField } }, done)
+      update.mutate({ id: upstream.id, patch: { name: name.trim(), upstream: host.trim(), zone: zone.trim(), interval_s: seconds, ...(profileChanged ? { profile_ids: profileIds } : {}), ...tsigField } }, done)
     } else {
       const body: RPZUpstreamCreate = {
         name: name.trim(),
         upstream: host.trim(),
         zone: zone.trim(),
         interval_s: seconds,
-        profile_id: profile === GLOBAL ? '' : profile,
+        profile_ids: profileIds,
         ...tsigField,
       }
       create.mutate(body, done)
@@ -225,23 +230,9 @@ function RpzDialog({ upstream, onClose }: { upstream: RPZUpstream | null; onClos
           <Field id="rpz-zone" label="Zone" hint="The RPZ zone name; a trailing dot is added automatically.">
             <Input id="rpz-zone" value={zone} onChange={(e) => setZone(e.target.value)} placeholder="rpz.komdigi.go.id" required />
           </Field>
-          {!upstream && (
-            <Field id="rpz-profile" label="Profile" hint="Which profile's build includes this zone; Global is shared by every profile.">
-              <Select value={profile} onValueChange={setProfile}>
-                <SelectTrigger id="rpz-profile" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={GLOBAL}>Global (shared by every profile)</SelectItem>
-                  {profiles.data?.items.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-          )}
+          <Field id="rpz-profile" label="Profiles" hint="Pick one or more profiles to build this zone for; leave empty to share it with every profile.">
+            <ProfileMultiSelect id="rpz-profile" profiles={profiles.data?.items} value={profileIds} onChange={setProfileIds} />
+          </Field>
           <Field id="rpz-interval" label="Interval (seconds)" hint="How often to check the master for a newer serial (60–86400).">
             <Input id="rpz-interval" type="number" min={60} max={86400} value={interval} onChange={(e) => setIntervalS(e.target.value)} required />
           </Field>

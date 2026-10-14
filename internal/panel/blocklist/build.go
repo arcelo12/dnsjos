@@ -72,8 +72,8 @@ func isURLKind(k string) bool {
 // isRPZDomainsKind is the kind the RPZ slave fills from AXFR/IXFR transfers. It is NOT a
 // URL source: its content is the transferred domain list, written by the sync job.
 func isRPZDomainsKind(k string) bool { return k == api.SourceRPZDomains }
-func isDomainKind(k string) bool { return strings.HasSuffix(k, "_domains") }
-func isIPKind(k string) bool     { return strings.HasSuffix(k, "_ips") }
+func isDomainKind(k string) bool     { return strings.HasSuffix(k, "_domains") }
+func isIPKind(k string) bool         { return strings.HasSuffix(k, "_ips") }
 
 const buildCols = `b.id, coalesce(b.profile_id::text, ''), coalesce(p.name, ''), b.started_at, b.finished_at, b.status, b.trigger, b.domains, b.ips, b.whitelisted, b.skipped, b.size_bytes, b.sha256, b.error, b.added, b.removed`
 
@@ -91,9 +91,22 @@ func scanBuild(row pgx.Row) (api.BlocklistBuild, error) {
 // ProfileID is the empty string for the global scope. It keys every query that has to
 // pick one scope apart from the others.
 //
-// scopeWhere builds a "profile_id IS NULL" / "profile_id = $n" predicate on a column.
+// scopeWhere builds a "profile_id IS NULL" / "profile_id = $n" predicate on a plain
+// profile_id column (blocklist_builds keeps one). Use sourceScopeWhere for sources, whose
+// profiles live in the blocklist_source_profiles join table.
 func scopeWhere(col string, n int) string {
 	return fmt.Sprintf("((%s IS NULL AND $%d = '') OR %s = nullif($%d, '')::uuid)", col, n, col, n)
+}
+
+// sourceScopeWhere builds the predicate that selects the sources one scope builds from:
+// the sources tied to $n by the blocklist_source_profiles join table, plus every global
+// source. A source with no join row is global and so belongs to every scope, including
+// the empty one. srcAlias is the blocklist_sources alias (e.g. "blocklist_sources" or "s").
+func sourceScopeWhere(srcAlias string, n int) string {
+	return fmt.Sprintf(
+		`(EXISTS (SELECT 1 FROM blocklist_source_profiles sp WHERE sp.source_id = %s.id AND sp.profile_id = nullif($%d, '')::uuid)
+			OR NOT EXISTS (SELECT 1 FROM blocklist_source_profiles sp2 WHERE sp2.source_id = %s.id))`,
+		srcAlias, n, srcAlias)
 }
 
 // Current returns the newest ok build for one scope, or nil when there is none. An empty
@@ -169,8 +182,16 @@ func (s *Service) tick(ctx context.Context) error {
 func (s *Service) scopes(ctx context.Context) []string {
 	rows, _ := s.d.Pool.Query(ctx, `
 		SELECT coalesce(profile_id::text, '') FROM (
-			SELECT profile_id FROM blocklist_sources WHERE enabled
+			-- every profile that owns at least one enabled source...
+			SELECT sp.profile_id FROM blocklist_source_profiles sp
+				JOIN blocklist_sources s ON s.id = sp.source_id WHERE s.enabled
 			UNION
+			-- ...plus the global scope whenever an enabled global source (no join rows) exists
+			SELECT NULL::uuid WHERE EXISTS (SELECT 1 FROM blocklist_sources s
+				WHERE s.enabled AND NOT EXISTS (SELECT 1 FROM blocklist_source_profiles sp WHERE sp.source_id = s.id))
+			UNION
+			-- ...plus every profile that still has an ok build, so a profile whose sources were
+			-- all removed or moved keeps converging instead of pinning a stale artifact forever.
 			SELECT profile_id FROM blocklist_builds WHERE status = 'ok'
 		) u GROUP BY profile_id ORDER BY profile_id NULLS FIRST`)
 	profiles, err := pgx.CollectRows(rows, pgx.RowTo[string])
@@ -243,8 +264,8 @@ func (s *Service) build(ctx context.Context, profileID string, force bool) (res 
 	// A profile builds from its own sources plus the global ones; anything scoped to a
 	// different profile is invisible here.
 	rows, _ := s.d.Pool.Query(ctx, `SELECT id, kind, url, content, etag, last_modified
-		FROM blocklist_sources WHERE enabled AND (`+scopeWhere("profile_id", 1)+
-		` OR profile_id IS NULL) ORDER BY id`, profileID)
+		FROM blocklist_sources WHERE enabled AND `+sourceScopeWhere("blocklist_sources", 1)+
+		` ORDER BY id`, profileID)
 	srcs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[source])
 	if err != nil {
 		return res, err

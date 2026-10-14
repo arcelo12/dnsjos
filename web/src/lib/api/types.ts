@@ -617,7 +617,10 @@ export interface BlocklistSource {
   id: string
   name: string
   kind: BlocklistSourceKind
-  /** Config profile that owns the source; "" = global (shared by all profiles). */
+  /** Config profiles that share the source; empty = global (shared by all profiles). */
+  profile_ids: string[]
+  profile_names: string[]
+  /** First profile, kept for single-profile clients; "" = global. */
   profile_id: string
   profile_name: string
   url: string
@@ -635,7 +638,9 @@ export interface BlocklistSource {
 export interface BlocklistSourceCreate {
   name: string
   kind: BlocklistSourceKind
-  /** Owning config profile; "" = global (shared by all profiles). */
+  /** Owning config profiles; empty/omitted = global (shared by all profiles). */
+  profile_ids?: string[]
+  /** Legacy single profile; folded into profile_ids when that is absent. */
   profile_id?: string
   url: string
   content: string
@@ -644,7 +649,9 @@ export interface BlocklistSourceCreate {
 
 export interface BlocklistSourcePatch {
   name?: string
-  /** Move the source to another profile ("" = global). */
+  /** Replace the source's profile set (empty = global). */
+  profile_ids?: string[]
+  /** Legacy single-profile move ("" = global); ignored when profile_ids is set. */
   profile_id?: string
   url?: string
   content?: string
@@ -664,6 +671,10 @@ export interface RPZUpstream {
   last_sync_at: string | null
   last_error: string
   source_id: string
+  /** Config profiles that share the RPZ master; empty = global. */
+  profile_ids: string[]
+  profile_names: string[]
+  /** First profile, kept for single-profile clients; "" = global. */
   profile_id: string
   profile_name: string
   created_at: string
@@ -678,6 +689,9 @@ export interface RPZUpstreamCreate {
   tsig_key?: string
   tsig_secret?: string
   interval_s?: number
+  /** Owning config profiles; empty/omitted = global. */
+  profile_ids?: string[]
+  /** Legacy single profile; folded into profile_ids when that is absent. */
   profile_id?: string
 }
 
@@ -685,6 +699,10 @@ export interface RPZUpstreamPatch {
   name?: string
   upstream?: string
   zone?: string
+  /** Replace the RPZ master's profile set (empty = global). */
+  profile_ids?: string[]
+  /** Legacy single-profile move ("" = global); ignored when profile_ids is set. */
+  profile_id?: string
   /** "" clears TSIG. */
   tsig_key?: string
   tsig_secret?: string
