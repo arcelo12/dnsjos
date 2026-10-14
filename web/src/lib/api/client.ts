@@ -49,6 +49,9 @@ import type {
   Profile,
   ProfileRequest,
   RenderedConfig,
+  RPZUpstream,
+  RPZUpstreamCreate,
+  RPZUpstreamPatch,
   Session,
   Settings,
   UpgradeAction,
@@ -232,6 +235,11 @@ export const api = {
     profiles: () => get<List<BlocklistProfile>>(`${V1}/blocklist/profiles`),
     lookup: (name: string) => get<BlocklistLookup>(`${V1}/blocklist/lookup?name=${enc(name)}`),
     changes: (id: number, q: BlocklistChangesQuery) => get<List<BlocklistChange>>(`${V1}/blocklist/builds/${id}/changes${qs({ ...q })}`),
+    rpzUpstreams: () => get<List<RPZUpstream>>(`${V1}/rpz/upstreams`),
+    createRPZUpstream: (u: RPZUpstreamCreate) => post<RPZUpstream>(`${V1}/rpz/upstreams`, u),
+    updateRPZUpstream: (id: string, u: RPZUpstreamPatch) => patch<RPZUpstream>(`${V1}/rpz/upstreams/${id}`, u),
+    removeRPZUpstream: (id: string) => del(`${V1}/rpz/upstreams/${id}`),
+    syncRPZUpstream: (id: string) => post<RPZUpstream>(`${V1}/rpz/upstreams/${id}/sync`, {}),
   },
   allowlist: {
     list: () => get<List<AllowEntry>>(`${V1}/allowlist`),
@@ -309,6 +317,7 @@ export const qk = {
   // Family keys: a prefix that matches every scope's query (the per-query keys above end in
   // a profile id, so the bare ["blocklist","sources"] is the correct prefix for "all").
   blocklistSourcesAll: ['blocklist', 'sources'] as const,
+  rpzUpstreams: ['rpz', 'upstreams'] as const,
   blocklistBuildsAll: ['blocklist', 'builds'] as const,
   blocklistCurrentAll: ['blocklist', 'current'] as const,
   blocklistLookup: (name: string) => ['blocklist', 'lookup', name] as const,
@@ -512,6 +521,22 @@ export const useBuildNow = () =>
     qk.blocklistProfiles,
     qk.overview,
   ])
+
+// RPZ slave (SPEC §7.7): an upstream owns a source of kind rpz_domains, so any change also
+// invalidates the source listings/builds.
+export const useRPZUpstreams = () =>
+  useQuery({ queryKey: qk.rpzUpstreams, queryFn: api.blocklist.rpzUpstreams, refetchInterval: LIVE })
+export const useCreateRPZUpstream = () =>
+  useMut(api.blocklist.createRPZUpstream, () => [qk.rpzUpstreams, qk.blocklistSourcesAll])
+export const useUpdateRPZUpstream = () =>
+  useMut((a: { id: string; patch: RPZUpstreamPatch }) => api.blocklist.updateRPZUpstream(a.id, a.patch), () => [
+    qk.rpzUpstreams,
+    qk.blocklistSourcesAll,
+  ])
+export const useDeleteRPZUpstream = () =>
+  useMut(api.blocklist.removeRPZUpstream, () => [qk.rpzUpstreams, qk.blocklistSourcesAll, qk.blocklistBuildsAll])
+export const useSyncRPZUpstream = () =>
+  useMut(api.blocklist.syncRPZUpstream, () => [qk.rpzUpstreams, qk.blocklistSourcesAll, qk.blocklistCurrentAll])
 
 export const useAddAllow = () => useMut(api.allowlist.create, () => [qk.allowlist, ['blocklist', 'lookup']])
 export const useDeleteAllow = () => useMut(api.allowlist.remove, () => [qk.allowlist, ['blocklist', 'lookup']])

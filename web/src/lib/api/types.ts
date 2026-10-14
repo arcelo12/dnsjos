@@ -610,6 +610,7 @@ export type BlocklistSourceKind =
   | 'url_ips'
   | 'manual_domains'
   | 'manual_ips'
+  | 'rpz_domains'
   | 'whitelist'
 
 export interface BlocklistSource {
@@ -648,6 +649,46 @@ export interface BlocklistSourcePatch {
   url?: string
   content?: string
   enabled?: boolean
+}
+
+/** An RPZ master the panel pulls the blocklist zone from via AXFR/IXFR (SPEC §7.7). */
+export interface RPZUpstream {
+  id: string
+  name: string
+  upstream: string
+  zone: string
+  has_tsig: boolean
+  interval_s: number
+  serial: number
+  total_domains: number
+  last_sync_at: string | null
+  last_error: string
+  source_id: string
+  profile_id: string
+  profile_name: string
+  created_at: string
+  updated_at: string
+}
+
+/** TSIG secret is write-only: set both tsig_key and tsig_secret, or neither. */
+export interface RPZUpstreamCreate {
+  name: string
+  upstream: string
+  zone: string
+  tsig_key?: string
+  tsig_secret?: string
+  interval_s?: number
+  profile_id?: string
+}
+
+export interface RPZUpstreamPatch {
+  name?: string
+  upstream?: string
+  zone?: string
+  /** "" clears TSIG. */
+  tsig_key?: string
+  tsig_secret?: string
+  interval_s?: number
 }
 
 export type BuildStatus = 'running' | 'ok' | 'failed' | 'skipped'
