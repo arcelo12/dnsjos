@@ -32,17 +32,20 @@ type rpzUpstream struct {
 	TotalDomains             int
 	LastError                string
 	SourceID                 string
-	ProfileID                string
+	ProfileIDs               []string
 }
 
 const rpzCols = `u.id, u.name, u.upstream, u.zone, u.tsig_key, u.tsig_secret,
 	u.interval_s, u.serial, u.total_domains, coalesce(u.last_error, ''), u.source_id,
-	coalesce(s.profile_id::text, '')`
+	array(SELECT sp.profile_id::text FROM blocklist_source_profiles sp WHERE sp.source_id = s.id ORDER BY sp.profile_id)`
 
 func scanRPZUpstream(row pgx.Row) (rpzUpstream, error) {
 	var u rpzUpstream
 	err := row.Scan(&u.ID, &u.Name, &u.Upstream, &u.Zone, &u.TSIGKey, &u.TSIGSecret,
-		&u.IntervalS, &u.Serial, &u.TotalDomains, &u.LastError, &u.SourceID, &u.ProfileID)
+		&u.IntervalS, &u.Serial, &u.TotalDomains, &u.LastError, &u.SourceID, &u.ProfileIDs)
+	if u.ProfileIDs == nil {
+		u.ProfileIDs = []string{}
+	}
 	return u, err
 }
 

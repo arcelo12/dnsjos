@@ -12,6 +12,8 @@ import { EmptyState } from '@/components/EmptyState'
 import { Field } from '@/components/ops/Field'
 import { toastError } from '@/components/ops/toast'
 import { PageHeader } from '@/components/PageHeader'
+import { ProfileMultiSelect } from '@/pages/blocklist/ProfileMultiSelect'
+import { profileSetLabel, sameProfiles } from '@/pages/blocklist/profiles'
 import { StatusBadge } from '@/components/StatusBadge'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
@@ -61,9 +63,7 @@ const ALL = '__all__'
 const GLOBAL = '__global__'
 /** Maps the selector's sentinel space to the API scope: undefined all, '' global, else profile. */
 const scopeFor = (sel: string) => (sel === ALL ? undefined : sel === GLOBAL ? '' : sel)
-/** The selector value for an API scope. */
-const selectFor = (scope: string | undefined) => (scope === undefined ? ALL : scope === '' ? GLOBAL : scope)
-const ownSources = (s: BlocklistSource, profileId: string) => s.profile_id === profileId
+const ownSources = (s: BlocklistSource, profileId: string) => s.profile_ids.includes(profileId)
 
 const buildDuration = (b: BlocklistBuild) =>
   b.finished_at ? fmtDuration((new Date(b.finished_at).getTime() - new Date(b.started_at).getTime()) / 1000) : '—'
@@ -625,7 +625,6 @@ function SourcesCard({ scope, profile }: { scope: string | undefined; profile: B
   const update = useUpdateSource()
   const remove = useDeleteSource()
   const [editing, setEditing] = useState<BlocklistSource | 'new' | null>(null)
-  const profileName = (id: string) => id || 'Global'
 
   const columns: Column<BlocklistSource>[] = [
     {
@@ -652,10 +651,12 @@ function SourcesCard({ scope, profile }: { scope: string | undefined; profile: B
     },
     {
       key: 'profile',
-      header: 'Profile',
-      sortValue: (s) => s.profile_id,
+      header: 'Profiles',
+      sortValue: (s) => s.profile_names.join(', '),
       cell: (s) => (
-        <span className={s.profile_id ? undefined : 'text-muted-foreground'}>{profileName(s.profile_id)}</span>
+        <span className={s.profile_ids.length > 0 ? undefined : 'text-muted-foreground'}>
+          {profileSetLabel(s.profile_names)}
+        </span>
       ),
     },
     { key: 'entries', header: 'Entries', align: 'right', sortValue: (s) => s.entries, cell: (s) => fmtNumber(s.entries) },
@@ -762,9 +763,11 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
   const [url, setUrl] = useState(source?.url ?? '')
   const [content, setContent] = useState(source?.content ?? '')
   const [enabled, setEnabled] = useState(source?.enabled ?? true)
-  // The dialog works in sentinel space (ALL / GLOBAL / a profile id). ALL only appears when the
-  // page filter is "all profiles", meaning "don't send profile_id, let the source be global".
-  const [profile, setProfile] = useState(source ? (source.profile_id === '' ? GLOBAL : source.profile_id) : selectFor(profileId))
+  // The dialog edits the source's profile set directly ([] = global). A new source starts
+  // from the page filter: a concrete profile preselects it, "all profiles" starts global.
+  const [profileIds, setProfileIds] = useState<string[]>(
+    source ? source.profile_ids : profileId && profileId !== '' ? [profileId] : [],
+  )
   const create = useCreateSource()
   const update = useUpdateSource()
   const manual = isManual(kind)
@@ -779,10 +782,9 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
       },
       onError: toastError,
     }
-    // A profile move is a scoped change the API treats specially (it clears the cached
-    // validators), so only send profile_id when it actually differs from the source's own.
-    const scope = scopeFor(profile)
-    const moved = source ? scope !== source.profile_id : scope !== undefined
+    // A profile-set change is a scoped change the API treats specially (it clears the cached
+    // validators), so only send profile_ids when the set actually differs from the source's own.
+    const changed = source ? !sameProfiles(profileIds, source.profile_ids) : profileIds.length > 0
     const body: BlocklistSourceCreate & BlocklistSourcePatch = {
       name: name.trim(),
       kind,
@@ -790,7 +792,7 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
       content: manual ? content : '',
       enabled,
     }
-    if (moved) body.profile_id = scope ?? ''
+    if (changed) body.profile_ids = profileIds
     if (source) update.mutate({ id: source.id, patch: body }, done)
     else create.mutate(body, done)
   }
@@ -808,22 +810,10 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
           </Field>
           <Field
             id="src-profile"
-            label="Profile"
-            hint={source ? 'Moving the source changes which profile builds it — the current build keeps it until the next one.' : 'Global sources are shared by every profile that has no own build.'}
+            label="Profiles"
+            hint={source ? 'Changing the profiles rebuilds the source for each one — the current build keeps it until the next build.' : 'Pick one or more profiles to build this source for them; leave empty to share it with every profile.'}
           >
-            <Select value={profile} onValueChange={setProfile}>
-              <SelectTrigger id="src-profile" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={GLOBAL}>Global (shared by every profile)</SelectItem>
-                {profiles.data?.items.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <ProfileMultiSelect id="src-profile" profiles={profiles.data?.items} value={profileIds} onChange={setProfileIds} />
           </Field>
           <Field id="src-kind" label="Kind" hint={source ? 'The kind cannot be changed after creation.' : undefined}>
             <Select value={kind} onValueChange={(v) => setKind(v as BlocklistSourceKind)} disabled={!!source}>

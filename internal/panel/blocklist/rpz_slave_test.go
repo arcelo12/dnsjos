@@ -470,3 +470,61 @@ func TestRPZUpstreamPatchTSIGPair(t *testing.T) {
 		t.Fatalf("has_tsig = true after clearing: %+v", cleared)
 	}
 }
+
+// An RPZ master can feed several profiles at once: create with profile_ids writes the join
+// rows on the paired source, the listing reports the whole set, and a patch replaces it
+// (which also clears the transferred content so the next sync rebuilds from scratch).
+func TestRPZUpstreamProfileSetHTTP(t *testing.T) {
+	_, pool, call := newHandlerSvc(t)
+	a, b, c := newProfile(t, pool, "A"), newProfile(t, pool, "B"), newProfile(t, pool, "C")
+
+	var created api.RPZUpstream
+	call("POST", "/api/v1/rpz/upstreams",
+		`{"name":"shared","upstream":"192.0.2.1:53","zone":"rpz.example","profile_ids":["`+a+`","`+b+`"]}`,
+		201, &created)
+	if len(created.ProfileIDs) != 2 || !contains(created.ProfileIDs, a) || !contains(created.ProfileIDs, b) {
+		t.Fatalf("created profile_ids = %v, want {%s,%s}", created.ProfileIDs, a, b)
+	}
+	if len(created.ProfileNames) != 2 || created.ProfileID != created.ProfileIDs[0] {
+		t.Fatalf("names/first mirror = %v / %q", created.ProfileNames, created.ProfileID)
+	}
+	if rows := joinCount(t, pool, created.SourceID); rows != 2 {
+		t.Fatalf("paired source join rows = %d, want 2", rows)
+	}
+
+	// A patch moves the set to {B,C}: the stale transfer is dropped so the next sync is full.
+	exec(t, pool, `UPDATE blocklist_sources SET content = 'stale.example' WHERE id = $1`, created.SourceID)
+	var patched api.RPZUpstream
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"profile_ids":["`+b+`","`+c+`"]}`, 200, &patched)
+	if len(patched.ProfileIDs) != 2 || !contains(patched.ProfileIDs, b) || !contains(patched.ProfileIDs, c) || contains(patched.ProfileIDs, a) {
+		t.Fatalf("patched profile_ids = %v", patched.ProfileIDs)
+	}
+	var content, legacy string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT content, coalesce(profile_id::text, '') FROM blocklist_sources WHERE id = $1`, created.SourceID).
+		Scan(&content, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if content != "" {
+		t.Fatalf("profile move kept stale content %q", content)
+	}
+	if legacy != b {
+		t.Fatalf("legacy profile_id = %q, want the first profile %q", legacy, b)
+	}
+
+	// Empty set returns it to global on the paired source.
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"profile_ids":[]}`, 200, &patched)
+	if len(patched.ProfileIDs) != 0 || patched.ProfileID != "" {
+		t.Fatalf("global master = %+v", patched)
+	}
+	if rows := joinCount(t, pool, created.SourceID); rows != 0 {
+		t.Fatalf("join rows after global = %d, want 0", rows)
+	}
+
+	// An unknown profile id is a 400 and leaves the (now empty) set untouched.
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID,
+		`{"profile_ids":["00000000-0000-0000-0000-000000000000"]}`, 400, nil)
+	if rows := joinCount(t, pool, created.SourceID); rows != 0 {
+		t.Fatalf("failed patch changed the set: %d join rows", rows)
+	}
+}

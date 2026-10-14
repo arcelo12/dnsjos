@@ -45,14 +45,41 @@ func newProfile(t *testing.T, pool *pgxpool.Pool, name string) string {
 }
 
 // addSource inserts one enabled manual source in a scope ("" = global) and returns its id.
+// A non-empty scope also gets a blocklist_source_profiles row, mirroring what the migration
+// backfills and what the CRUD writes, so the join table is the single source of truth.
 func addSource(t *testing.T, pool *pgxpool.Pool, name, kind, content, profileID string) string {
 	t.Helper()
+	ctx := context.Background()
 	var id string
-	if err := pool.QueryRow(context.Background(),
+	if err := pool.QueryRow(ctx,
 		`INSERT INTO blocklist_sources (name, kind, content, profile_id)
 		 VALUES ($1, $2, $3, nullif($4, '')::uuid) RETURNING id::text`,
 		name, kind, content, profileID).Scan(&id); err != nil {
 		t.Fatal(err)
+	}
+	if profileID != "" {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO blocklist_source_profiles (source_id, profile_id) VALUES ($1, $2)`, id, profileID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return id
+}
+
+// addSharedSource inserts one enabled manual source tied to every profile in profileIDs via
+// the join table (an empty list = global) and returns its id.
+func addSharedSource(t *testing.T, pool *pgxpool.Pool, name, kind, content string, profileIDs ...string) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	if err := pool.QueryRow(ctx, `INSERT INTO blocklist_sources (name, kind, content) VALUES ($1, $2, $3) RETURNING id::text`,
+		name, kind, content).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range profileIDs {
+		if _, err := pool.Exec(ctx, `INSERT INTO blocklist_source_profiles (source_id, profile_id) VALUES ($1, $2)`, id, pid); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return id
 }
