@@ -437,3 +437,36 @@ func TestRPZUpstreamCreateValidation(t *testing.T) {
 	call("POST", "/api/v1/rpz/upstreams", `{"name":"x","upstream":"h:53","zone":"z.","interval_s":5}`, 400, nil)
 	call("POST", "/api/v1/rpz/upstreams", `{"name":"","upstream":"h:53","zone":"z."}`, 400, nil)
 }
+
+// PATCH treats TSIG as a pair: setting key+secret works, clearing with tsig_key:"" works,
+// but a lone key or lone secret is a 400 (it would leave the upstream signing with no
+// secret and fail every transfer).
+func TestRPZUpstreamPatchTSIGPair(t *testing.T) {
+	_, _, call := newHandlerSvc(t)
+	var created api.RPZUpstream
+	call("POST", "/api/v1/rpz/upstreams", `{"name":"k","upstream":"h:53","zone":"z."}`, 201, &created)
+
+	// Lone key without secret: 400.
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"tsig_key":"k."}`, 400, nil)
+	// Non-empty secret without key: 400.
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"tsig_secret":"abc"}`, 400, nil)
+	// Key with an empty secret: 400 (must send tsig_key:"" to clear).
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"tsig_key":"k.","tsig_secret":""}`, 400, nil)
+	// Empty key with a non-empty secret: 400. It must not silently clear TSIG (a typo'd
+	// key would otherwise disable signing and the browser dialog would report success).
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"tsig_key":"","tsig_secret":"abc"}`, 400, nil)
+
+	// Setting the pair works and shows has_tsig.
+	var setTSIG api.RPZUpstream
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"tsig_key":"k.","tsig_secret":"`+tsigB64+`"}`, 200, &setTSIG)
+	if !setTSIG.HasTSIG {
+		t.Fatalf("has_tsig = false after setting key+secret: %+v", setTSIG)
+	}
+
+	// Clearing with tsig_key:"" drops it.
+	var cleared api.RPZUpstream
+	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"tsig_key":""}`, 200, &cleared)
+	if cleared.HasTSIG {
+		t.Fatalf("has_tsig = true after clearing: %+v", cleared)
+	}
+}
