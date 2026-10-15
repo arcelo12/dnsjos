@@ -105,6 +105,7 @@ func (s *Service) rpzSyncUpstream(ctx context.Context, up rpzUpstream, force boo
 		last_sync_at = now(), last_error = '' WHERE id = $1`, up.ID, serial, len(domains)); err != nil {
 		return err
 	}
+	s.markDirty(ctx, up.SourceID)
 	_ = audit.Log(ctx, s.d.Pool, nil, "blocklist.rpz.sync", "rpz_upstream", up.ID,
 		map[string]any{"serial": serial, "domains": len(domains)}, "")
 	return nil

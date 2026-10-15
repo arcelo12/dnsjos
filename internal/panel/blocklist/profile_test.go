@@ -108,6 +108,28 @@ func blockedIn(t *testing.T, s *Service, b api.BlocklistBuild, name string) bool
 	return res.Blocked
 }
 
+func TestDirtySourceForcesRecentScopeBuild(t *testing.T) {
+	s, pool := newProfileSvc(t)
+	profile := newProfile(t, pool, "dirty-profile")
+	sourceID := addSource(t, pool, "dirty", "rpz_domains", "old.example", profile)
+	before := buildScope(t, s, profile)
+
+	// The normal interval would skip this recent build; a successful source sync marks
+	// the owning scope dirty and must make tick rebuild it immediately.
+	exec(t, pool, `UPDATE blocklist_sources SET content = 'new.example\n' WHERE id = $1`, sourceID)
+	s.markDirty(context.Background(), sourceID)
+	if err := s.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := Current(context.Background(), pool, profile)
+	if err != nil || cur == nil || cur.ID == before.ID {
+		t.Fatalf("dirty scope current = %+v (before %d), err=%v", cur, before.ID, err)
+	}
+	if !blockedIn(t, s, *cur, "new.example") || blockedIn(t, s, *cur, "old.example") {
+		t.Fatalf("dirty rebuild artifact does not reflect updated source")
+	}
+}
+
 // A profile build is its own sources plus the global ones, and nothing from another
 // profile: A's CDB differs from the global and B builds and carries only A+global names.
 func TestProfileBuildScoping(t *testing.T) {

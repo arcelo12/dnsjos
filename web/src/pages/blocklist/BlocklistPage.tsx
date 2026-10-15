@@ -30,6 +30,7 @@ import {
   qk,
   useBlocklistChanges,
   useBlocklistLookup,
+  useBlocklistSource,
   useBlocklistProfiles,
   useBlocklistSources,
   useBuildNow,
@@ -757,6 +758,54 @@ function SourcesCard({ scope, profile }: { scope: string | undefined; profile: B
 }
 
 function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource | null; profileId: string | undefined; onClose: () => void }) {
+  const detail = useBlocklistSource(source?.id)
+  const loaded = !source || !!detail.data
+  const displayed = detail.data ?? source
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{displayed ? `Edit ${displayed.name}` : 'Add blocklist source'}</DialogTitle>
+        </DialogHeader>
+        {!loaded ? (
+          detail.isError ? (
+            <div className="grid gap-4">
+              <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+                <p>Could not load the source contents.</p>
+                <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => void detail.refetch()}>
+                  Retry
+                </Button>
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={onClose}>
+                  Cancel
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <div className="grid gap-4">
+              <div className="grid gap-3" aria-label="Loading source">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-40 w-full" />
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={onClose}>
+                  Cancel
+                </Button>
+              </DialogFooter>
+            </div>
+          )
+        ) : (
+          <SourceForm source={displayed} profileId={profileId} onClose={onClose} />
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SourceForm({ source, profileId, onClose }: { source: BlocklistSource | null; profileId: string | undefined; onClose: () => void }) {
   const profiles = useBlocklistProfiles()
   const [name, setName] = useState(source?.name ?? '')
   const [kind, setKind] = useState<BlocklistSourceKind>(source?.kind ?? 'url_domains')
@@ -782,8 +831,8 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
       },
       onError: toastError,
     }
-    // A profile-set change is a scoped change the API treats specially (it clears the cached
-    // validators), so only send profile_ids when the set actually differs from the source's own.
+    // A profile-set change is a scoped change the API treats specially ([] = global), so only
+    // send profile_ids when the set actually differs from the source's own.
     const changed = source ? !sameProfiles(profileIds, source.profile_ids) : profileIds.length > 0
     const body: BlocklistSourceCreate & BlocklistSourcePatch = {
       name: name.trim(),
@@ -799,72 +848,65 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
 
   const lines = manual ? content.split('\n').filter((l) => l.trim() && !l.trim().startsWith('#')).length : 0
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{source ? `Edit ${source.name}` : 'Add blocklist source'}</DialogTitle>
-        </DialogHeader>
-        <form onSubmit={submit} className="grid gap-4">
-          <Field id="src-name" label="Name">
-            <Input id="src-name" value={name} onChange={(e) => setName(e.target.value)} required />
-          </Field>
-          <Field
-            id="src-profile"
-            label="Profiles"
-            hint={source ? 'Changing the profiles rebuilds the source for each one — the current build keeps it until the next build.' : 'Pick one or more profiles to build this source for them; leave empty to share it with every profile.'}
-          >
-            <ProfileMultiSelect id="src-profile" profiles={profiles.data?.items} value={profileIds} onChange={setProfileIds} />
-          </Field>
-          <Field id="src-kind" label="Kind" hint={source ? 'The kind cannot be changed after creation.' : undefined}>
-            <Select value={kind} onValueChange={(v) => setKind(v as BlocklistSourceKind)} disabled={!!source}>
-              <SelectTrigger id="src-kind" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.entries(KINDS)
-                  .filter(([k]) => !isSlave(k as BlocklistSourceKind))
-                  .map(([k, label]) => (
-                    <SelectItem key={k} value={k}>
-                      {label}
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          {manual ? (
-            <Field
-              id="src-content"
-              label={kind === 'whitelist' ? 'Whitelisted domains' : 'Entries'}
-              hint={`One ${kind === 'manual_ips' ? 'IPv4 or CIDR (≤ /24)' : 'domain'} per line; # starts a comment. ${lines} entries.`}
-            >
-              <Textarea
-                id="src-content"
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                rows={10}
-                className="max-h-80 font-mono text-xs"
-                placeholder={kind === 'manual_ips' ? '203.0.113.7\n198.51.100.0/24' : 'example.com\nbad.example.net'}
-              />
-            </Field>
-          ) : (
-            <Field id="src-url" label="URL" hint="Fetched on every build with If-None-Match / If-Modified-Since.">
-              <Input id="src-url" type="url" value={url} onChange={(e) => setUrl(e.target.value)} required placeholder="https://…" />
-            </Field>
-          )}
-          <label className="flex items-center gap-2 text-sm">
-            <Switch checked={enabled} onCheckedChange={setEnabled} />
-            Enabled
-          </label>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={pending || !name.trim()}>
-              {source ? 'Save' : 'Add source'}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+    <form onSubmit={submit} className="grid gap-4">
+      <Field id="src-name" label="Name">
+        <Input id="src-name" value={name} onChange={(e) => setName(e.target.value)} required />
+      </Field>
+      <Field
+        id="src-profile"
+        label="Profiles"
+        hint={source ? 'Changing the profiles rebuilds the source for each one — the current build keeps it until the next build.' : 'Pick one or more profiles to build this source for them; leave empty to share it with every profile.'}
+      >
+        <ProfileMultiSelect id="src-profile" profiles={profiles.data?.items} value={profileIds} onChange={setProfileIds} />
+      </Field>
+      <Field id="src-kind" label="Kind" hint={source ? 'The kind cannot be changed after creation.' : undefined}>
+        <Select value={kind} onValueChange={(v) => setKind(v as BlocklistSourceKind)} disabled={!!source}>
+          <SelectTrigger id="src-kind" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {Object.entries(KINDS)
+              .filter(([k]) => !isSlave(k as BlocklistSourceKind))
+              .map(([k, label]) => (
+                <SelectItem key={k} value={k}>
+                  {label}
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </Select>
+      </Field>
+      {manual ? (
+        <Field
+          id="src-content"
+          label={kind === 'whitelist' ? 'Whitelisted domains' : 'Entries'}
+          hint={`One ${kind === 'manual_ips' ? 'IPv4 or CIDR (≤ /24)' : 'domain'} per line; # starts a comment. ${lines} entries.`}
+        >
+          <Textarea
+            id="src-content"
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            rows={10}
+            className="max-h-80 font-mono text-xs"
+            placeholder={kind === 'manual_ips' ? '203.0.113.7\n198.51.100.0/24' : 'example.com\nbad.example.net'}
+          />
+        </Field>
+      ) : (
+        <Field id="src-url" label="URL" hint="Fetched on every build with If-None-Match / If-Modified-Since.">
+          <Input id="src-url" type="url" value={url} onChange={(e) => setUrl(e.target.value)} required placeholder="https://…" />
+        </Field>
+      )}
+      <label className="flex items-center gap-2 text-sm">
+        <Switch checked={enabled} onCheckedChange={setEnabled} />
+        Enabled
+      </label>
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={pending || !name.trim()}>
+          {source ? 'Save' : 'Add source'}
+        </Button>
+      </DialogFooter>
+    </form>
   )
 }

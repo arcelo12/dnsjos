@@ -246,6 +246,9 @@ func TestRPZSlaveFullTransferFillsSource(t *testing.T) {
 
 	// The build treats the slave source like any manual one.
 	b := buildScope(t, s, "")
+	if cur, err := Current(context.Background(), pool, ""); err != nil || cur == nil || cur.ID != b.ID {
+		t.Fatalf("current after RPZ sync/build = %+v, err=%v", cur, err)
+	}
 	if !blockedIn(t, s, b, "ads.example") || !blockedIn(t, s, b, "track.example") {
 		t.Fatalf("build did not block the transferred domains")
 	}

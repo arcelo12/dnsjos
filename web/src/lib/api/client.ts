@@ -222,6 +222,7 @@ export const api = {
     /** profileId omitted = every scope; '' = global; otherwise that config profile. */
     sources: (profileId?: string) =>
       get<List<BlocklistSource>>(`${V1}/blocklist/sources${profileScope(profileId)}`),
+    source: (id: string) => get<BlocklistSource>(`${V1}/blocklist/sources/${id}`),
     createSource: (s: BlocklistSourceCreate) => post<BlocklistSource>(`${V1}/blocklist/sources`, s),
     updateSource: (id: string, s: BlocklistSourcePatch) => patch<BlocklistSource>(`${V1}/blocklist/sources/${id}`, s),
     removeSource: (id: string) => del(`${V1}/blocklist/sources/${id}`),
@@ -311,6 +312,7 @@ export const qk = {
   profileVersion: (id: string, v: number) => ['profiles', id, 'versions', v] as const,
   versionDiff: (id: string, a: number, b: number) => ['profiles', id, 'diff', a, b] as const,
   blocklistSources: (profileId?: string) => ['blocklist', 'sources', profileId ?? null] as const,
+  blocklistSource: (id: string) => ['blocklist', 'source', id] as const,
   blocklistBuilds: (profileId?: string) => ['blocklist', 'builds', profileId ?? null] as const,
   blocklistCurrent: (profileId?: string) => ['blocklist', 'current', profileId ?? null] as const,
   blocklistProfiles: ['blocklist', 'profiles'] as const,
@@ -406,6 +408,12 @@ export const useVersionDiff = (id: string, a: number | undefined, b: number | un
   })
 export const useBlocklistSources = (profileId?: string) =>
   useQuery({ queryKey: qk.blocklistSources(profileId), queryFn: () => api.blocklist.sources(profileId) })
+export const useBlocklistSource = (id: string | undefined) =>
+  useQuery({
+    queryKey: qk.blocklistSource(id ?? ''),
+    queryFn: () => api.blocklist.source(id ?? ''),
+    enabled: id !== undefined,
+  })
 export const useBlocklistBuilds = (profileId?: string) =>
   useQuery({
     queryKey: qk.blocklistBuilds(profileId),
@@ -510,7 +518,7 @@ export const useCreateSource = () => useMut(api.blocklist.createSource, () => [q
 export const useUpdateSource = () =>
   useMut(
     (a: { id: string; patch: BlocklistSourcePatch }) => api.blocklist.updateSource(a.id, a.patch),
-    () => [qk.blocklistSourcesAll, qk.blocklistProfiles, qk.blocklistCurrentAll, qk.blocklistBuildsAll],
+    (a) => [qk.blocklistSourcesAll, qk.blocklistProfiles, qk.blocklistCurrentAll, qk.blocklistBuildsAll, qk.blocklistSource(a.id)],
   )
 export const useDeleteSource = () => useMut(api.blocklist.removeSource, () => [qk.blocklistSourcesAll, qk.blocklistProfiles])
 export const useBuildNow = () =>

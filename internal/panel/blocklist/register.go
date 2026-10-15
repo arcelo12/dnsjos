@@ -41,6 +41,7 @@ func Register(r *app.Router, d *app.Deps) {
 
 func (s *Service) routes(r *app.Router) {
 	r.Viewer("GET /api/v1/blocklist/sources", s.listSources)
+	r.Viewer("GET /api/v1/blocklist/sources/{id}", s.getSource)
 	r.Admin("POST /api/v1/blocklist/sources", s.createSource)
 	r.Admin("PATCH /api/v1/blocklist/sources/{id}", s.patchSource)
 	r.Admin("DELETE /api/v1/blocklist/sources/{id}", s.deleteSource)
@@ -63,6 +64,14 @@ func (s *Service) routes(r *app.Router) {
 }
 
 const sourceCols = `id, name, kind, url, content, enabled,
+	array(SELECT sp.profile_id::text FROM blocklist_source_profiles sp WHERE sp.source_id = blocklist_sources.id ORDER BY sp.profile_id),
+	array(SELECT p.name FROM blocklist_source_profiles sp JOIN config_profiles p ON p.id = sp.profile_id WHERE sp.source_id = blocklist_sources.id ORDER BY sp.profile_id),
+	etag, last_modified, last_fetch_at, last_status, entries, created_at, updated_at`
+
+// sourceListCols deliberately omits the (potentially very large) source content. Keep the
+// empty content expression in the projection so the shared scanner and response shape remain
+// compatible, while PostgreSQL never transfers the stored payload for list requests.
+const sourceListCols = `id, name, kind, url, ''::text, enabled,
 	array(SELECT sp.profile_id::text FROM blocklist_source_profiles sp WHERE sp.source_id = blocklist_sources.id ORDER BY sp.profile_id),
 	array(SELECT p.name FROM blocklist_source_profiles sp JOIN config_profiles p ON p.id = sp.profile_id WHERE sp.source_id = blocklist_sources.id ORDER BY sp.profile_id),
 	etag, last_modified, last_fetch_at, last_status, entries, created_at, updated_at`
@@ -172,7 +181,7 @@ func (s *Service) listSources(w http.ResponseWriter, r *http.Request) {
 		where = " WHERE " + sourceScopeWhere("blocklist_sources", 1)
 		args = append(args, profileID)
 	}
-	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+sourceCols+" FROM blocklist_sources"+where+" ORDER BY created_at, name", args...)
+	rows, _ := s.d.Pool.Query(r.Context(), "SELECT "+sourceListCols+" FROM blocklist_sources"+where+" ORDER BY created_at, name", args...)
 	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.BlocklistSource, error) { return scanSource(row) })
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
@@ -182,6 +191,15 @@ func (s *Service) listSources(w http.ResponseWriter, r *http.Request) {
 		items = []api.BlocklistSource{}
 	}
 	httpx.WriteJSON(w, http.StatusOK, api.List[api.BlocklistSource]{Items: items, Total: len(items)})
+}
+
+func (s *Service) getSource(w http.ResponseWriter, r *http.Request) {
+	src, err := scanSource(s.d.Pool.QueryRow(r.Context(), "SELECT "+sourceCols+" FROM blocklist_sources WHERE id = $1", r.PathValue("id")))
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, src)
 }
 
 func (s *Service) createSource(w http.ResponseWriter, r *http.Request) {
