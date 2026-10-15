@@ -145,6 +145,23 @@ func TestListSourcesScopeHTTP(t *testing.T) {
 	}
 }
 
+func TestListSourcesOmitsContentAndDetailIncludesItHTTP(t *testing.T) {
+	_, pool, call := newHandlerSvc(t)
+	content := strings.Repeat("very-large-domain.example\n", 1000)
+	id := addSource(t, pool, "large", "manual_domains", content, "")
+
+	var list api.List[api.BlocklistSource]
+	call("GET", "/api/v1/blocklist/sources", "", http.StatusOK, &list)
+	if len(list.Items) != 1 || list.Items[0].Content != "" {
+		t.Fatalf("list content = %q, want empty", list.Items[0].Content)
+	}
+	var detail api.BlocklistSource
+	call("GET", "/api/v1/blocklist/sources/"+id, "", http.StatusOK, &detail)
+	if detail.Content != content {
+		t.Fatalf("detail content length = %d, want %d", len(detail.Content), len(content))
+	}
+}
+
 // listProfiles reports, per profile, whether it has a build of its own or falls back to
 // the global one — exactly what the "Served" badge reads.
 func TestListProfilesServedHTTP(t *testing.T) {

@@ -50,12 +50,50 @@ type Service struct {
 	// multiplexed onto one TCP connection, which is slower than a single stream.
 	rangeClient *http.Client
 	mu          sync.Mutex // single-flight build
+	dirtyMu     sync.Mutex
+	dirty       map[string]bool // scopes invalidated by successful source syncs
 }
 
 func newService(d *app.Deps) *Service {
-	return &Service{d: d, dir: filepath.Join(d.Cfg.DataDir, "blocklist"), client: newHTTPClient(true), rangeClient: newHTTPClient(false)}
+	return &Service{d: d, dir: filepath.Join(d.Cfg.DataDir, "blocklist"), client: newHTTPClient(true), rangeClient: newHTTPClient(false), dirty: make(map[string]bool)}
 }
 
+func (s *Service) markDirty(ctx context.Context, sourceID string) {
+	rows, err := s.d.Pool.Query(ctx, `SELECT coalesce(sp.profile_id::text, '') FROM blocklist_sources bs
+		LEFT JOIN blocklist_source_profiles sp ON sp.source_id = bs.id WHERE bs.id = $1`, sourceID)
+	if err != nil {
+		return
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return
+	}
+	global := len(ids) == 0
+	for _, id := range ids {
+		if id == "" {
+			global = true
+		}
+	}
+	if global {
+		ids = s.scopes(ctx)
+	}
+	s.dirtyMu.Lock()
+	defer s.dirtyMu.Unlock()
+	for _, id := range ids {
+		s.dirty[id] = true
+	}
+}
+
+func (s *Service) isDirty(profileID string) bool {
+	s.dirtyMu.Lock()
+	defer s.dirtyMu.Unlock()
+	return s.dirty[profileID]
+}
+func (s *Service) clearDirty(profileID string) {
+	s.dirtyMu.Lock()
+	delete(s.dirty, profileID)
+	s.dirtyMu.Unlock()
+}
 func (s *Service) artifact(sha string) string { return filepath.Join(s.dir, sha+".cdb") }
 func (s *Service) sourcePath(id string) string {
 	return filepath.Join(s.dir, "sources", id+".txt")
@@ -155,7 +193,7 @@ func (s *Service) tick(ctx context.Context) error {
 			profileID).Scan(&last); err != nil {
 			return err
 		}
-		if last != nil && time.Since(*last) < every {
+		if last != nil && time.Since(*last) < every && !s.isDirty(profileID) {
 			continue
 		}
 		if !s.mu.TryLock() {
@@ -166,9 +204,13 @@ func (s *Service) tick(ctx context.Context) error {
 			s.mu.Unlock()
 			return err
 		}
+		s.clearDirty(profileID)
 		_, err = s.execute(ctx, b.ID, profileID, false)
 		s.mu.Unlock()
 		if err != nil {
+			s.dirtyMu.Lock()
+			s.dirty[profileID] = true
+			s.dirtyMu.Unlock()
 			return err
 		}
 	}
