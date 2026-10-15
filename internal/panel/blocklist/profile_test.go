@@ -116,7 +116,7 @@ func TestDirtySourceForcesRecentScopeBuild(t *testing.T) {
 
 	// The normal interval would skip this recent build; a successful source sync marks
 	// the owning scope dirty and must make tick rebuild it immediately.
-	exec(t, pool, `UPDATE blocklist_sources SET content = 'new.example\n' WHERE id = $1`, sourceID)
+	exec(t, pool, `UPDATE blocklist_sources SET content = 'new.example' || chr(10) WHERE id = $1`, sourceID)
 	s.markDirty(context.Background(), sourceID)
 	if err := s.tick(context.Background()); err != nil {
 		t.Fatal(err)

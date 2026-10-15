@@ -137,18 +137,35 @@ func (u rpzUpstream) sign(m *dns.Msg) {
 
 // transferRPZ does the whole pull: SOA serial, then AXFR (no local serial) or IXFR.
 // It returns the upstream serial and the full domain list (already normalized).
+//
+// An IXFR answer is a DELTA (deleted records then added records), not a full zone.
+// The delta must be applied on top of the last-known full domain set; treating the
+// delta itself as the whole zone would silently drop every pre-existing domain.
 func (s *Service) transferRPZ(ctx context.Context, up rpzUpstream) (uint32, []string, error) {
 	zone := dns.Fqdn(up.Zone)
 	serial, err := s.rpzSOA(ctx, up, zone)
 	if err != nil {
 		return 0, nil, err
 	}
-	req := new(dns.Msg)
 	if up.Serial == 0 {
-		req.SetAxfr(zone)
-	} else {
-		req.SetIxfr(zone, up.Serial, "ns1."+zone, "hostmaster."+zone)
+		return s.axfrDomains(ctx, up, zone, serial)
 	}
+	domains, ok, err := s.ixfrDomains(ctx, up, zone, serial)
+	if err != nil {
+		return 0, nil, err
+	}
+	if !ok {
+		// No usable last-known set (or the master refused IXFR): fall back to a
+		// full AXFR so content is always the complete zone, never a bare delta.
+		return s.axfrDomains(ctx, up, zone, serial)
+	}
+	return serial, domains, nil
+}
+
+// axfrDomains pulls the full zone via AXFR and extracts the normalized domain list.
+func (s *Service) axfrDomains(ctx context.Context, up rpzUpstream, zone string, serial uint32) (uint32, []string, error) {
+	req := new(dns.Msg)
+	req.SetAxfr(zone)
 	up.sign(req)
 	tr := &dns.Transfer{DialTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second,
 		WriteTimeout: 5 * time.Second, TsigSecret: up.tsigSecret()}
@@ -171,6 +188,139 @@ func (s *Service) transferRPZ(ctx context.Context, up rpzUpstream) (uint32, []st
 		return 0, nil, err
 	}
 	return serial, domains, nil
+}
+
+// ixfrDomains applies the IXFR delta on top of the last-known full domain set taken
+// from the linked source's content. It returns ok=false when there is no usable
+// base set or the server's answer is not an incremental update; the caller then
+// falls back to AXFR.
+func (s *Service) ixfrDomains(ctx context.Context, up rpzUpstream, zone string, serial uint32) ([]string, bool, error) {
+	var content string
+	if err := s.d.Pool.QueryRow(ctx,
+		"SELECT content FROM blocklist_sources WHERE id = $1", up.SourceID).Scan(&content); err != nil {
+		return nil, false, fmt.Errorf("load source content: %w", err)
+	}
+	base := make(map[string]struct{})
+	for line := range strings.Lines(content) {
+		if name, ok := normalizeDomain(stripLine(line)); ok {
+			base[name] = struct{}{}
+		}
+	}
+	if len(base) == 0 {
+		return nil, false, nil // nothing to apply a delta onto: use AXFR
+	}
+	req := new(dns.Msg)
+	req.SetIxfr(zone, up.Serial, "ns1."+zone, "hostmaster."+zone)
+	up.sign(req)
+	tr := &dns.Transfer{DialTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second,
+		WriteTimeout: 5 * time.Second, TsigSecret: up.tsigSecret()}
+	envs, err := tr.In(req, up.Upstream)
+	if err != nil {
+		return nil, false, fmt.Errorf("transfer: %w", err)
+	}
+	var records []dns.RR
+	soas := 0
+	for env := range envs {
+		if env.Error != nil {
+			return nil, false, fmt.Errorf("transfer stream: %w", env.Error)
+		}
+		for _, rr := range env.RR {
+			if rr.Header().Rrtype == dns.TypeSOA {
+				soas++
+			}
+		}
+		if len(records)+len(env.RR) > rpzMaxTransferRecords {
+			return nil, false, fmt.Errorf("transfer exceeds %d records", rpzMaxTransferRecords)
+		}
+		records = append(records, env.RR...)
+	}
+	if soas < 2 {
+		// One SOA => the server answered with the full zone (already complete:
+		// parse it directly). Zero => not a usable IXFR answer at all.
+		if soas == 1 && len(records) > 1 {
+			domains, err := rpzOwners(records, zone)
+			if err != nil {
+				return nil, false, err
+			}
+			return domains, true, nil
+		}
+		return nil, false, nil
+	}
+	// A genuine delta starts with SOA(oldSerial) and its second SOA carries the new
+	// serial. Two SOAs with the SAME serial mean the server answered with the full
+	// zone (how miekg/dns terminates a full-transfer IXFR): parse it directly.
+	firstSOA, lastSOA := soaSerial(records)
+	if firstSOA == lastSOA {
+		domains, err := rpzOwners(records, zone)
+		if err != nil {
+			return nil, false, err
+		}
+		return domains, true, nil
+	}
+	// Delta layout: SOA(oldSerial), deletions..., SOA(newSerial), additions...
+	section := 0
+	for _, rr := range records {
+		if rr.Header().Rrtype == dns.TypeSOA {
+			section++
+			continue
+		}
+		names, err := ownerNames(rr, zone)
+		if err != nil {
+			return nil, false, err
+		}
+		if section == 1 {
+			for _, n := range names {
+				delete(base, n)
+			}
+		} else if section >= 2 {
+			for _, n := range names {
+				base[n] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(base))
+	for n := range base {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out, true, nil
+}
+
+// soaSerial returns the serial of the first and last SOA in a transfer stream.
+func soaSerial(records []dns.RR) (uint32, uint32) {
+	var first, last uint32
+	for _, rr := range records {
+		if soa, ok := rr.(*dns.SOA); ok {
+			if first == 0 {
+				first = soa.Serial
+			}
+			last = soa.Serial
+		}
+	}
+	return first, last
+}
+
+// ownerNames returns the normalized blocked-domain name of a single delta record,
+// or nil for records that carry no blocked domain. An owner outside the RPZ zone
+// is a protocol error.
+func ownerNames(rr dns.RR, zone string) ([]string, error) {
+	owner := strings.ToLower(dns.Fqdn(rr.Header().Name))
+	if !dns.IsSubDomain(zone, owner) {
+		return nil, fmt.Errorf("owner outside RPZ zone: %s", owner)
+	}
+	if owner == zone {
+		return nil, nil
+	}
+	switch rr.Header().Rrtype {
+	case dns.TypeCNAME, dns.TypeA, dns.TypeAAAA:
+	default:
+		return nil, nil
+	}
+	domain := strings.TrimSuffix(strings.TrimSuffix(owner, zone), ".")
+	if name, ok := normalizeDomain(domain); ok {
+		return []string{name}, nil
+	}
+	return nil, nil
 }
 
 func (s *Service) rpzSOA(ctx context.Context, up rpzUpstream, zone string) (uint32, error) {
