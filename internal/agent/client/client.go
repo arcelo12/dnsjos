@@ -224,3 +224,32 @@ func (c *Client) Allowlist(ctx context.Context, version string) (*api.Allowlist,
 	}
 	return &out, nil
 }
+
+// ── recursor mode (SPEC §20) ────────────────────────────────────────────────
+
+func (c *Client) EnrollRecursor(ctx context.Context, req api.RecursorEnrollRequest) (api.RecursorEnrollResponse, error) {
+	var out api.RecursorEnrollResponse
+	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/recursor/enroll", req, &out, nil)
+	return out, err
+}
+
+// RecursorConfig fetches the recursor's desired config; version is the last seen one
+// (0 = none). nil config with nil error means 304 (unchanged).
+func (c *Client) RecursorConfig(ctx context.Context, version int) (*api.RecursorConfig, error) {
+	var hdr http.Header
+	if version > 0 {
+		hdr = http.Header{"If-None-Match": {`"` + strconv.Itoa(version) + `"`}}
+	}
+	var out api.RecursorConfig
+	code, _, err := c.JSON(ctx, http.MethodGet, "/agent/v1/recursor/config", nil, &out, hdr)
+	if err != nil || code == http.StatusNotModified {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) RecursorHeartbeat(ctx context.Context, hb *api.RecursorHeartbeat) (api.RecursorAck, error) {
+	var out api.RecursorAck
+	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/recursor/heartbeat", hb, &out, nil)
+	return out, err
+}

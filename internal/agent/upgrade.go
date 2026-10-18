@@ -24,6 +24,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/billyriantono/dnsjos/internal/agent/apply"
+	"github.com/billyriantono/dnsjos/internal/agent/client"
 	"github.com/billyriantono/dnsjos/internal/agent/dnsdist"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
@@ -410,54 +411,7 @@ func (a *agent) backupApt(orig map[string][]byte) error {
 // upgradeAgent replaces the running binary with the panel's and stops the agent; the
 // result is reported by the new binary (AgentMarkerPath). Only failures return a result.
 func (a *agent) upgradeAgent(ctx context.Context) *api.UpgradeResult {
-	err := func() error {
-		exe, err := executable()
-		if err == nil {
-			exe, err = filepath.EvalSymlinks(exe)
-		}
-		if err != nil {
-			return err
-		}
-		url := "/dl/agent/linux/" + runtime.GOARCH
-		var sum bytes.Buffer
-		if err := a.download(ctx, url+".sha256", &sum); err != nil {
-			return err
-		}
-		want, _, _ := strings.Cut(strings.TrimSpace(sum.String()), " ")
-		f, err := os.OpenFile(exe+".new", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
-		if err != nil {
-			return err
-		}
-		h := sha256.New()
-		err = a.download(ctx, url, io.MultiWriter(f, h))
-		if err == nil {
-			err = f.Sync()
-		}
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if got := hex.EncodeToString(h.Sum(nil)); err == nil && !strings.EqualFold(got, want) {
-			err = fmt.Errorf("sha256 mismatch: got %s, panel says %q", got, want)
-		}
-		if err != nil {
-			os.Remove(exe + ".new")
-			return err
-		}
-		os.Remove(exe + ".prev")
-		if err := os.Link(exe, exe+".prev"); err != nil {
-			a.o.Log.Warn("keeping the previous agent binary failed", "err", err)
-		}
-		if err := os.Rename(exe+".new", exe); err != nil {
-			return err
-		}
-		if d, err := os.Open(filepath.Dir(exe)); err == nil {
-			d.Sync()
-			d.Close()
-		}
-		b, _ := json.Marshal(agentMarker{UpgradeResult: api.UpgradeResult{Kind: api.UpgradeAgent, From: a.o.Version, At: time.Now().UTC()}})
-		return writePrivate(a.o.path(AgentMarkerPath), b)
-	}()
-	if err != nil {
+	if err := replaceAgentBinary(ctx, a.o, a.cl); err != nil {
 		return &api.UpgradeResult{Kind: api.UpgradeAgent, From: a.o.Version, Error: err.Error(), At: time.Now().UTC()}
 	}
 	a.o.Log.Info("agent binary replaced, restarting")
@@ -468,14 +422,69 @@ func (a *agent) upgradeAgent(ctx context.Context) *api.UpgradeResult {
 	return nil
 }
 
-func (a *agent) download(ctx context.Context, path string, w io.Writer) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	req, err := a.cl.NewRequest(ctx, http.MethodGet, path, nil)
+// replaceAgentBinary downloads the panel's agent for this architecture, checks its
+// sha256, swaps it in (the old one stays as .prev) and writes the upgrade marker that the
+// new binary confirms or rolls back (upgradeGuard). Node and recursor mode share it.
+func replaceAgentBinary(ctx context.Context, o Options, cl *client.Client) error {
+	exe, err := executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
 	if err != nil {
 		return err
 	}
-	resp, err := a.cl.Do(req)
+	url := "/dl/agent/linux/" + runtime.GOARCH
+	var sum bytes.Buffer
+	if err := download(ctx, cl, url+".sha256", &sum); err != nil {
+		return err
+	}
+	want, _, _ := strings.Cut(strings.TrimSpace(sum.String()), " ")
+	f, err := os.OpenFile(exe+".new", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	err = download(ctx, cl, url, io.MultiWriter(f, h))
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); err == nil && !strings.EqualFold(got, want) {
+		err = fmt.Errorf("sha256 mismatch: got %s, panel says %q", got, want)
+	}
+	if err != nil {
+		os.Remove(exe + ".new")
+		return err
+	}
+	os.Remove(exe + ".prev")
+	if err := os.Link(exe, exe+".prev"); err != nil {
+		o.Log.Warn("keeping the previous agent binary failed", "err", err)
+	}
+	if err := os.Rename(exe+".new", exe); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(exe)); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	b, _ := json.Marshal(agentMarker{UpgradeResult: api.UpgradeResult{Kind: api.UpgradeAgent, From: o.Version, At: time.Now().UTC()}})
+	return writePrivate(o.path(AgentMarkerPath), b)
+}
+
+func (a *agent) download(ctx context.Context, path string, w io.Writer) error {
+	return download(ctx, a.cl, path, w)
+}
+
+func download(ctx context.Context, cl *client.Client, path string, w io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := cl.NewRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := cl.Do(req)
 	if err != nil {
 		return err
 	}
@@ -558,26 +567,35 @@ func (a *agent) confirmUpgrade() {
 	if m == nil {
 		return
 	}
-	res := m.UpgradeResult
-	res.To, res.OK, res.At = a.o.Version, true, time.Now().UTC()
-	b, _ := json.Marshal(res)
-	writePrivate(a.o.path(LastUpgradePath), b)
-	os.Remove(a.o.path(AgentMarkerPath))
+	res := confirmAgentUpgrade(a.o, m)
 	a.mu.Lock()
 	a.lastUp = &res
 	a.mu.Unlock()
-	a.o.Log.Info("agent upgraded", "from", res.From, "to", res.To)
 	poke(a.hbNow)
 }
 
+// confirmAgentUpgrade stores the upgrade of marker m as done and removes the marker.
+func confirmAgentUpgrade(o Options, m *agentMarker) api.UpgradeResult {
+	res := m.UpgradeResult
+	res.To, res.OK, res.At = o.Version, true, time.Now().UTC()
+	b, _ := json.Marshal(res)
+	writePrivate(o.path(LastUpgradePath), b)
+	os.Remove(o.path(AgentMarkerPath))
+	o.Log.Info("agent upgraded", "from", res.From, "to", res.To)
+	return res
+}
+
 // loadLastUpgrade reads last_upgrade and a pending agent upgrade marker.
-func (a *agent) loadLastUpgrade() {
+func (a *agent) loadLastUpgrade() { a.marker, a.lastUp = loadUpgradeState(a.o) }
+
+func loadUpgradeState(o Options) (marker *agentMarker, last *api.UpgradeResult) {
 	var m agentMarker
-	if b, err := os.ReadFile(a.o.path(AgentMarkerPath)); err == nil && json.Unmarshal(b, &m) == nil {
-		a.marker = &m
+	if b, err := os.ReadFile(o.path(AgentMarkerPath)); err == nil && json.Unmarshal(b, &m) == nil {
+		marker = &m
 	}
 	var res api.UpgradeResult
-	if b, err := os.ReadFile(a.o.path(LastUpgradePath)); err == nil && json.Unmarshal(b, &res) == nil {
-		a.lastUp = &res
+	if b, err := os.ReadFile(o.path(LastUpgradePath)); err == nil && json.Unmarshal(b, &res) == nil {
+		last = &res
 	}
+	return marker, last
 }
