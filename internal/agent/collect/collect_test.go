@@ -69,3 +69,17 @@ func TestDnsdist(t *testing.T) {
 		t.Fatalf("unreachable dnsdist: %+v", hb)
 	}
 }
+
+func TestCPUPct(t *testing.T) {
+	var c cpuSampler
+	if got := c.pct([]byte("cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 1 2 3\n")); got != 0 {
+		t.Fatalf("first sample = %v, want 0", got)
+	}
+	// +100 busy (user), +300 idle, +100 iowait: 100/500 = 20%.
+	if got := c.pct([]byte("cpu  200 0 100 1100 100 0 0 0 0 0\n")); got != 20 {
+		t.Fatalf("second sample = %v, want 20", got)
+	}
+	if got := c.pct([]byte("garbage")); got != 0 {
+		t.Fatalf("garbage = %v, want 0", got)
+	}
+}

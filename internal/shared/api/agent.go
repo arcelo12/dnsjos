@@ -100,6 +100,11 @@ type SystemStats struct {
 	MemTotalMB int64   `json:"mem_total_mb"`
 	MemAvailMB int64   `json:"mem_avail_mb"`
 	DiskFreeMB int64   `json:"disk_free_mb"`
+	// DiskTotalMB, CPUs and CPUPct (busy share of all CPUs since the previous sample;
+	// 0 on the first) were added with recursors (SPEC §20); older agents send zeros.
+	DiskTotalMB int64   `json:"disk_total_mb"`
+	CPUs        int     `json:"cpus"`
+	CPUPct      float64 `json:"cpu_pct"`
 }
 
 // Counters are raw, monotonically increasing dnsdist values; the panel computes deltas.
