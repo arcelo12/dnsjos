@@ -90,6 +90,9 @@ than the global set. The allowlist unblocks a wrongly listed CDN within ~15 s, w
 ### ⚖️ Smarter resolving
 - **Your own recursor**: the installer can add **Unbound** or **PowerDNS Recursor** on
   each node, so dnsdist stops forwarding to public resolvers.
+- **Managed recursors**: run Unbound or PowerDNS Recursor on hosts of their own, installed
+  with one command, configured (allow-list, ECS, cache) and monitored from the panel, and
+  picked as an upstream in one click.
 - **ECS per upstream**: CDNs answer for the customer's subnet, never for private or
   CGNAT addresses, and spoofed client subnets are replaced.
 - **DNSSEC** validation can be switched off per profile, or skipped only for zones with

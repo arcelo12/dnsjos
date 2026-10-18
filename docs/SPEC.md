@@ -1239,3 +1239,58 @@ Types live in `internal/shared/api/analytics.go`.
   (Top domains [Raw | Grouped toggle], NXDOMAIN, SERVFAIL), top table with share bars,
   qtype/rcode breakdown charts, daily volume chart, CSV export. Node detail gets a
   compact "Top domains today" card. Counts from sampled nodes are marked approximate.
+
+## 20. Recursors — managed upstream resolvers
+
+A **recursor** is a PowerDNS Recursor or Unbound host that nodes use as an upstream. The
+panel installs, configures and monitors it; `dnsjos-agent` runs on it in **recursor mode**
+(`agent.json` `role: "recursor"`, `kind: "pdns" | "unbound"`), never touching dnsdist.
+
+* **Install**: Recursors → Add recursor creates a single-use token (`recursor_tokens`, kind
+  fixed) and `curl -fsSL <panel>/install-recursor.sh | sudo sh -s -- --token T --kind K`.
+  The script installs the resolver (PowerDNS Recursor 5.4 from repo.powerdns.com, or the
+  distro Unbound), tunes UDP buffers and the source port range, downloads the agent
+  (sha256-checked) and runs `dnsjos-agent enroll --recursor --kind K`. It refuses a host
+  enrolled as a node and a kind other than the enrolled one.
+* **Agent protocol** (bearer = recursor token; node and recursor tokens never open each
+  other's routes): `POST /agent/v1/recursor/enroll` (public; the token's kind must match
+  the installer's), `GET /agent/v1/recursor/config` (`api.RecursorConfig`, ETag = version),
+  `POST /agent/v1/recursor/heartbeat` (`api.RecursorHeartbeat` → `api.RecursorAck` with the
+  desired config version and queued commands `reapply`, `restart_resolver`, `upgrade_agent`).
+* **Settings** (`recursors.settings`, `api.RecursorSettings`): extra allow entries, ECS on/off
+  (default on) with optional zones, cache size in MB (0 = from RAM: PowerDNS 250 record
+  entries per MB of RAM within 200k..2M, Unbound rrset cache RAM/16 within 64..1024 MB).
+  DNSSEC `validate`, prefetch and serve-stale are fixed.
+* **Allow-list**: loopback + every live node's `public_ip` and heartbeat `public_ipv6` + the
+  extra entries. The whole fleet is allowed, not only the nodes using the recursor, so a
+  profile publish or staged rollout never has a node querying before it is allowed. Extra
+  entries narrower than /8 (IPv4) or /16 (IPv6) only; the agent drops anything else again.
+  The config version changes with any input, so a node joining or leaving reaches every
+  recursor with its next heartbeat.
+* **Rendering** (`internal/agent/resolver`): PowerDNS `recursor.d/dnsjos.yml` + the ACL file
+  `/etc/powerdns/dnsjos-allow.txt` (`allow_from_file`); Unbound `unbound.conf.d/dnsjos.conf` +
+  `dnsjos-acl.conf`. It listens on the local IPv4 holding the default route (behind NAT the
+  private one), a global IPv6 if present and 127.0.0.1, port 53, with non-local bind. With
+  ECS the resolver takes dnsdist's client subnet and sends it to authoritative servers;
+  queries without one use the recursor's public IPv4 as scope-zero address (never a private
+  or CGNAT one).
+* **Apply**: only the ACL file changed → `rec_control reload-acls` / `unbound-control
+  reload_keep_cache` (fallback `reload`), no restart. Otherwise a restart (Unbound after
+  `unbound-checkconf`); a resolver that is not `active` (twice, 2 s apart) within ~10 s gets
+  the previous files back and is restarted on them, and the error is reported. Invalid
+  settings are never written.
+* **Heartbeat / status**: resolver running, a test lookup of `a.root-servers.net` through
+  127.0.0.1:53, counters (`rec_control get-all`: questions, packet cache hits/misses,
+  servfail-answers, all-outqueries, qa-latency; `unbound-control stats_noreset`: total
+  queries, cache hits/misses, SERVFAIL rcodes, udp/tcp out, recursion time), host stats
+  (CPU %, load, memory, disk total/free) and listen addresses. Degraded = resolver down,
+  test lookup failing or apply error; offline after 3 missed heartbeats. Deltas go to
+  `recursor_metrics_minutely` (same retention as node metrics).
+* **API**: `GET/PATCH/DELETE /api/v1/recursors[/{id}]` (each item carries `allow`, `used_by`
+  = node upstreams pointing at its public or listen IP, config sync, live rates),
+  `/{id}/live`, `/{id}/metrics` (node range parameters), `POST /{id}/commands`,
+  `GET/POST/DELETE /api/v1/recursor-tokens`.
+* **UI**: Monitoring → Recursors (list, pending tokens, Add recursor), detail page with
+  traffic charts (QPS, cache hit, latency, SERVFAIL %, outgoing), network and host cards,
+  "used by" with an ECS-mismatch warning, Settings and Actions tabs. The profile upstreams
+  editor has **Add recursor**, which adds `<public IP>:53` with the recursor's ECS setting.

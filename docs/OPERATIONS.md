@@ -31,6 +31,20 @@ The installer also tunes the kernel and NIC for DNS (`/etc/sysctl.d/91-dnsjos-tu
 an operator already raised. On a VM whose NIC has a single queue (`ethtool -l`), ask the
 provider for multiqueue virtio (`queues=<vCPUs>`): software RPS works, the NIC does it cheaper.
 
+## Adding a recursor
+
+A recursor is a PowerDNS Recursor or Unbound host your nodes use as an upstream, on its
+own server (SPEC §20). **Recursors → Add recursor**, pick the resolver, and run the command
+as root on a fresh Debian 12/13 or Ubuntu 22.04/24.04 host. Within seconds it shows up as
+online: DNSSEC on, ECS on, and only your nodes (plus the extra entries in its Settings)
+may query it. Then, in a profile's upstreams, **Add recursor** points the nodes at it.
+
+Re-running the installer on a host that already runs the same resolver by hand takes it
+over: the agent replaces `/etc/powerdns/recursor.d/dnsjos.yml` (PowerDNS) or writes
+`/etc/unbound/unbound.conf.d/dnsjos*.conf` (Unbound) and restarts the resolver once. Back
+up a hand-written config first. A node that reaches a recursor over a private network,
+or another trusted host, goes in Settings → extra addresses.
+
 ## Adopting a live dnsdist server (rolling, zero customer downtime)
 
 Live servers run dnsdist with the dnsdist_ootb YAML wrapper. Adoption keeps the dnsdist
