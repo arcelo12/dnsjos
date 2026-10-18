@@ -132,3 +132,49 @@ func isStatus(err error, status int) bool {
 	var he *httpErr
 	return errors.As(err, &he) && he.status == status
 }
+
+func TestStagedConfigRolloutSkipsOfflineNode(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	var prof string
+	e.scalar(`INSERT INTO config_profiles (name) VALUES ('edge') RETURNING id`, &prof)
+	for v := 1; v <= 2; v++ {
+		e.run(`INSERT INTO config_versions (profile_id, version, spec, published) VALUES ($1, $2, $3, $4)`, prof, v, api.DefaultConfigSpec(), v == 1)
+	}
+	a := e.node("ns-a", "2.0.0-1", 100)
+	off := e.node("ns-off", "2.0.0-1", 0)
+	e.run("UPDATE nodes SET profile_id = $1 WHERE id = ANY($2)", prof, []string{a, off})
+	e.run("UPDATE nodes SET status = 'offline' WHERE id = $1", off)
+
+	var runID int64
+	if err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
+		var err error
+		if runID, err = StartConfigRollout(ctx, tx, prof, 2, nil, e.now); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, "UPDATE config_versions SET published = true WHERE profile_id = $1 AND version = 2", prof)
+		return err
+	}); err != nil {
+		t.Fatal("an offline node must not block a config rollout:", err)
+	}
+	e.tick() // ns-off skipped, ns-a released
+	if got := statuses(e.get(runID)); got != "running ns-off=skipped,ns-a=running" {
+		t.Fatal(got)
+	}
+	var pin *int
+	e.scalar("SELECT config_pin FROM nodes WHERE id = $1", &pin, off)
+	if pin == nil {
+		t.Fatal("the offline node must stay pinned until the run finishes")
+	}
+	want, _, _ := nodes.DesiredConfigVersion(ctx, e.pool, a)
+	e.now = e.now.Add(15 * time.Second)
+	e.run(`UPDATE nodes SET applied_config_version = $2, last_seen_at = $3, last_heartbeat = '{}' WHERE id = $1`, a, want, e.now)
+	e.tick()
+	if got := statuses(e.get(runID)); got != "done ns-off=skipped,ns-a=ok" {
+		t.Fatal(got)
+	}
+	e.scalar("SELECT config_pin FROM nodes WHERE id = $1", &pin, off)
+	if pin != nil {
+		t.Fatal("a finished run must release the offline node's pin")
+	}
+}

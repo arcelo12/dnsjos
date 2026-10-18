@@ -54,7 +54,7 @@ func StartConfigRollout(ctx context.Context, tx pgx.Tx, profileID string, versio
 	if err != nil || len(ids) == 0 {
 		return 0, err
 	}
-	if err := notReady(ctx, tx, 0); err != nil {
+	if err := notReady(ctx, tx, 0, true); err != nil {
 		return 0, err
 	}
 	if err := tx.QueryRow(ctx, `INSERT INTO upgrade_runs (kind, target_version, profile_id, created_by, created_at)

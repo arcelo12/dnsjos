@@ -59,6 +59,12 @@ func (s *svc) tick(ctx context.Context) error {
 				Scan(&st.position, &st.status, &st.startedAt, &st.nodeID, &st.name, &st.nodeStatus, &st.deleted,
 					&st.version, &st.lastSeen, &st.last, &st.fromVersion, &st.applied, &st.applyErr)
 			if db.IsNotFound(err) {
+				if rn.kind == api.UpgradeConfig { // nodes skipped while offline get the rolled-out version when back
+					if _, err := tx.Exec(ctx, `UPDATE nodes SET config_pin = NULL WHERE config_pin IS NOT NULL
+						AND coalesce(profile_id, (SELECT id FROM config_profiles WHERE name = 'default')) = $1`, rn.profileID); err != nil {
+						return err
+					}
+				}
 				_, err = tx.Exec(ctx, "UPDATE upgrade_runs SET status = 'done', finished_at = $2, message = '' WHERE id = $1", rn.id, now)
 				return err
 			}
@@ -76,6 +82,8 @@ func (s *svc) tick(ctx context.Context) error {
 				switch {
 				case st.deleted:
 					err = setStep(api.StepSkipped, "node deleted")
+				case rn.kind == api.UpgradeConfig && st.nodeStatus == api.NodeOffline:
+					err = setStep(api.StepSkipped, "node offline: it gets v"+rn.target+" when the run finishes")
 				case rn.kind != api.UpgradeConfig && st.version == rn.target:
 					err = setStep(api.StepSkipped, "already at "+rn.target)
 				default:
@@ -130,7 +138,7 @@ func (s *svc) startStep(ctx context.Context, tx pgx.Tx, rn run, st step, now tim
 	if err := db.LockUpgrades(ctx, tx); err != nil {
 		return err
 	}
-	if err := notReady(ctx, tx, rn.id); err != nil {
+	if err := notReady(ctx, tx, rn.id, rn.kind == api.UpgradeConfig); err != nil {
 		if he, ok := err.(*httpErr); ok {
 			return pause(ctx, tx, rn.id, "not starting "+st.name+": "+he.msg)
 		}
