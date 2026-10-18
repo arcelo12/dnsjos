@@ -218,6 +218,11 @@ export interface SystemStats {
   mem_total_mb: number
   mem_avail_mb: number
   disk_free_mb: number
+  /** 0 from agents older than the recursor release. */
+  disk_total_mb: number
+  cpus: number
+  /** Busy share of all CPUs since the previous heartbeat, 0..100. */
+  cpu_pct: number
 }
 
 export interface Counters {
@@ -310,6 +315,7 @@ export type CommandType =
   | 'upgrade_dnsdist'
   | 'set_dnsdist_series'
   | 'upgrade_agent'
+  | 'restart_resolver'
 /** version: upgrade_dnsdist only (one of the node's dnsdist_available); series: set_dnsdist_series only (Meta.supported_series). */
 export interface CommandRequest {
   type: CommandType
@@ -945,4 +951,139 @@ export interface Branding {
   name: string
   tagline: string
   assets: Record<BrandingAssetKey, string | null>
+}
+
+// ─── §20 Recursors (recursor.go) ───────────────────────────────────────────
+export type RecursorKind = 'pdns' | 'unbound'
+export const RECURSOR_KINDS: RecursorKind[] = ['pdns', 'unbound']
+
+export interface RecursorSettings {
+  allow_extra: string[]
+  ecs: boolean
+  ecs_zones: string[]
+  /** 0 = sized from the host's RAM. */
+  cache_mb: number
+}
+
+export interface RecursorUser {
+  node_id: string
+  node_name: string
+  address: string
+  ecs: boolean
+}
+
+export interface Recursor {
+  id: string
+  name: string
+  kind: RecursorKind
+  hostname: string
+  public_ip: string
+  listen_ip: string
+  listen_ipv6: string
+  status: NodeStatus
+  settings: RecursorSettings
+  enrolled_at: string | null
+  last_seen_at: string | null
+  agent_version: string
+  agent_outdated: boolean
+  resolver_version: string
+  os: string
+  arch: string
+  applied_config_version: number | null
+  desired_config_version: number
+  config_in_sync: boolean
+  last_error: string
+  created_at: string
+  qps: number
+  cache_hit_ratio: number
+  latency_avg_ms: number
+  allow: string[]
+  used_by: RecursorUser[]
+}
+
+export interface RecursorPatch {
+  name?: string
+  public_ip?: string
+  settings?: RecursorSettings
+}
+
+export interface RecursorTokenCreate {
+  name: string
+  kind: RecursorKind
+  ttl_hours: number
+}
+
+export interface RecursorTokenCreated {
+  id: string
+  token: string
+  install_command: string
+  expires_at: string
+}
+
+export interface RecursorToken {
+  id: string
+  name: string
+  kind: RecursorKind
+  created_by: string | null
+  created_at: string
+  expires_at: string
+  used_at: string | null
+  used_by: string | null
+}
+
+export interface RecursorCounters {
+  queries: number
+  cache_hits: number
+  cache_misses: number
+  servfail: number
+  outgoing: number
+}
+
+export interface RecursorHeartbeat {
+  time: string
+  agent_version: string
+  resolver_version: string
+  os: string
+  uptime_s: number
+  resolver_running: boolean
+  probe_ok: boolean
+  probe_error: string
+  probe_ms: number
+  applied_config_version: number
+  apply_error: string
+  stats_error: string
+  listen_ip: string
+  listen_ipv6: string
+  system: SystemStats
+  counters: RecursorCounters
+  latency_avg_ms: number
+  acked_commands: number[] | null
+  last_upgrade?: UpgradeResult
+}
+
+export interface RecursorLive {
+  recursor_id: string
+  heartbeat: RecursorHeartbeat | null
+  received_at: string | null
+}
+
+export interface RecursorMetricSample {
+  ts: string
+  queries: number
+  cache_hits: number
+  cache_misses: number
+  servfail: number
+  outgoing: number
+  latency_avg_ms: number
+  qps: number
+  cache_hit_ratio: number
+  servfail_ratio: number
+  outgoing_qps: number
+}
+
+export interface RecursorMetricSeries {
+  from: string
+  to: string
+  step_s: number
+  points: RecursorMetricSample[]
 }

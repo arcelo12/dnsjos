@@ -1,6 +1,7 @@
 import type { IconType } from 'react-icons'
 import {
   LuChartNoAxesColumn,
+  LuDatabase,
   LuFileChartColumn,
   LuLayoutDashboard,
   LuPackageCheck,
@@ -52,6 +53,7 @@ const groups: { label: string; items: NavItem[]; admin?: boolean }[] = [
     items: [
       { to: '/', label: 'Overview', icon: LuLayoutDashboard },
       { to: '/nodes', label: 'Nodes', icon: LuServer },
+      { to: '/recursors', label: 'Recursors', icon: LuDatabase },
       { to: '/analytics', label: 'Analytics', icon: LuChartNoAxesColumn },
       { to: '/offenders', label: 'Offenders', icon: LuSiren },
     ],
