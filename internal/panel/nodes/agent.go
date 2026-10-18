@@ -539,3 +539,49 @@ func (s *svc) cgk(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// NodeUpstream is a live node and the upstreams of the config it is served.
+type NodeUpstream struct {
+	NodeID, NodeName string
+	Servers          []api.Upstream
+}
+
+// ServedUpstreams returns, for every live node whose profile has a published version,
+// the upstreams of its effective config (as effectiveConfig picks it). A node whose
+// overrides no longer merge is skipped: it keeps running its last config.
+func ServedUpstreams(ctx context.Context, q db.Querier) ([]NodeUpstream, error) {
+	rows, _ := q.Query(ctx, `
+		SELECT n.id, n.name, v.spec, n.overrides
+		FROM nodes n
+		JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
+		JOIN LATERAL (SELECT spec FROM config_versions WHERE profile_id = p.id AND published
+		              AND (n.config_pin IS NULL OR version <= n.config_pin)
+		              ORDER BY version DESC LIMIT 1) v ON true
+		WHERE n.deleted_at IS NULL
+		ORDER BY n.name`)
+	type row struct {
+		id, name   string
+		spec, over []byte
+	}
+	items, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (row, error) {
+		var x row
+		err := r.Scan(&x.id, &x.name, &x.spec, &x.over)
+		return x, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]NodeUpstream, 0, len(items))
+	for _, it := range items {
+		var base api.ConfigSpec
+		if json.Unmarshal(it.spec, &base) != nil {
+			continue
+		}
+		spec, err := api.MergeSpec(base, it.over)
+		if err != nil {
+			continue
+		}
+		out = append(out, NodeUpstream{NodeID: it.id, NodeName: it.name, Servers: spec.Upstreams.Servers})
+	}
+	return out, nil
+}

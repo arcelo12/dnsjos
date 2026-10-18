@@ -1,0 +1,201 @@
+#!/bin/sh
+# DnsJos recursor installer (SPEC §20), served by the panel at /install-recursor.sh.
+#   curl -fsSL {{.PanelURL}}/install-recursor.sh | sudo sh -s -- --token TOKEN --kind pdns|unbound [--panel URL]
+# Installs PowerDNS Recursor or Unbound and dnsjos-agent in recursor mode; the agent writes
+# the resolver config from the panel (allow-list, ECS, cache) and reports health and stats.
+# Idempotent: safe to re-run. Supports Debian 12/13 and Ubuntu 22.04/24.04 on amd64/arm64.
+set -eu
+
+PANEL_URL='{{.PanelURL}}'
+TOKEN=''
+KIND=''
+REC_SERIES='54' # PowerDNS Recursor 5.4.x from repo.powerdns.com (as the node installer)
+AGENT_BIN=/usr/local/bin/dnsjos-agent
+AGENT_CONF=/etc/dnsjos/agent.json
+STATE_DIR=/var/lib/dnsjos
+UNIT=/etc/systemd/system/dnsjos-agent.service
+
+say() { printf '==> %s\n' "$*"; }
+die() { printf 'dnsjos-install-recursor: error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<EOF
+usage: install-recursor.sh --token TOKEN --kind pdns|unbound [--panel URL]
+  --token TOKEN  recursor token from the panel (Recursors -> Add recursor)
+  --kind KIND    pdns (PowerDNS Recursor, repo.powerdns.com) or unbound (distro package)
+  --panel URL    panel URL (default: $PANEL_URL)
+EOF
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--token) [ $# -ge 2 ] || die "--token needs a value"; TOKEN=$2; shift 2 ;;
+		--token=*) TOKEN=${1#--token=}; shift ;;
+		--kind) [ $# -ge 2 ] || die "--kind needs a value"; KIND=$2; shift 2 ;;
+		--kind=*) KIND=${1#--kind=}; shift ;;
+		--panel) [ $# -ge 2 ] || die "--panel needs a value"; PANEL_URL=$2; shift 2 ;;
+		--panel=*) PANEL_URL=${1#--panel=}; shift ;;
+		-h|--help) usage; exit 0 ;;
+		*) usage >&2; die "unknown argument: $1" ;;
+	esac
+done
+PANEL_URL=${PANEL_URL%/}
+
+[ "$(id -u)" -eq 0 ] || die "must run as root (pipe into 'sudo sh')"
+case "$KIND" in pdns|unbound) ;; *) usage >&2; die "--kind must be pdns or unbound" ;; esac
+case "$PANEL_URL" in http://*|https://*) ;; *) die "--panel must be an http(s) URL" ;; esac
+if [ -s "$AGENT_CONF" ]; then
+	grep -q '"role": *"recursor"' "$AGENT_CONF" ||
+		die "this host is enrolled as a DnsJos node ($AGENT_CONF): a recursor needs its own host"
+	grep -q "\"kind\": *\"$KIND\"" "$AGENT_CONF" ||
+		die "this recursor is enrolled with another resolver; delete it in the panel and $AGENT_CONF to switch"
+else
+	[ -n "$TOKEN" ] || { usage >&2; die "--token is required"; }
+fi
+
+# ── 1. OS / architecture ────────────────────────────────────────────────────
+[ -r /etc/os-release ] || die "cannot read /etc/os-release"
+# shellcheck disable=SC1091
+. /etc/os-release
+OS_ID=${ID:-}
+OS_VER=${VERSION_ID:-}
+CODENAME=${VERSION_CODENAME:-}
+case "$OS_ID:$OS_VER" in
+	debian:12|debian:13|ubuntu:22.04|ubuntu:24.04) ;;
+	*) die "unsupported OS ${PRETTY_NAME:-$OS_ID $OS_VER} (need Debian 12/13 or Ubuntu 22.04/24.04)" ;;
+esac
+[ -n "$CODENAME" ] || die "VERSION_CODENAME missing from /etc/os-release"
+ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+case "$ARCH" in
+	amd64|x86_64) ARCH=amd64 ;;
+	arm64|aarch64) ARCH=arm64 ;;
+	*) die "unsupported architecture $ARCH (need amd64 or arm64)" ;;
+esac
+command -v systemctl >/dev/null 2>&1 || die "systemd is required"
+say "installing a DnsJos recursor ($KIND) on $OS_ID $OS_VER ($ARCH), panel $PANEL_URL"
+
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTS='-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold'
+
+need_pkgs=''
+command -v curl >/dev/null 2>&1 || need_pkgs="$need_pkgs curl"
+command -v sha256sum >/dev/null 2>&1 || need_pkgs="$need_pkgs coreutils"
+[ -f /etc/ssl/certs/ca-certificates.crt ] || need_pkgs="$need_pkgs ca-certificates"
+if [ -n "$need_pkgs" ]; then
+	say "installing prerequisites:$need_pkgs"
+	apt-get update -q
+	# shellcheck disable=SC2086
+	apt-get install $APT_OPTS $need_pkgs
+fi
+mkdir -p "$STATE_DIR"
+chmod 0711 "$STATE_DIR"
+
+# ── 2. kernel tuning for a busy recursive resolver ──────────────────────────
+cat >/etc/sysctl.d/90-dnsjos-recursor.conf <<EOF
+# DnsJos recursor tuning, written by install-recursor.sh.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.netdev_max_backlog = 16384
+# Keep the resolver cache in RAM.
+vm.swappiness = 10
+EOF
+# More source ports for recursive queries (spoofing resistance), unless a TCP service
+# already listens inside the ports this adds.
+if ! ss -Hltn 2>/dev/null | awk '{n = split($4, a, ":"); p = a[n] + 0; if (p >= 10000 && p < 32768) bad = 1} END {exit !bad}'; then
+	echo 'net.ipv4.ip_local_port_range = 10000 65535' >>/etc/sysctl.d/90-dnsjos-recursor.conf
+fi
+sysctl -q -p /etc/sysctl.d/90-dnsjos-recursor.conf >/dev/null 2>&1 || true
+
+# ── 3. the resolver ─────────────────────────────────────────────────────────
+# The other resolver would hold port 53: never run both.
+OTHER=unbound
+[ "$KIND" = pdns ] || OTHER=pdns-recursor
+! systemctl is-active --quiet "$OTHER" 2>/dev/null ||
+	die "$OTHER is running here: 'systemctl disable --now $OTHER' first, or add this host with --kind for it"
+
+if [ "$KIND" = pdns ]; then
+	if ! command -v pdns_recursor >/dev/null 2>&1; then
+		say "installing PowerDNS Recursor $REC_SERIES"
+		REC_KEYRING=/etc/apt/keyrings/pdns-rec-pub.asc
+		install -d -m 0755 /etc/apt/keyrings
+		curl -fsSL https://repo.powerdns.com/FD380FBB-pub.asc -o "$REC_KEYRING.tmp"
+		mv "$REC_KEYRING.tmp" "$REC_KEYRING"
+		chmod 0644 "$REC_KEYRING"
+		echo "deb [signed-by=$REC_KEYRING] https://repo.powerdns.com/$OS_ID $CODENAME-rec-$REC_SERIES main" \
+			>/etc/apt/sources.list.d/pdns-rec.list
+		cat >/etc/apt/preferences.d/pdns-rec-$REC_SERIES <<EOF
+Package: pdns-recursor*
+Pin: origin repo.powerdns.com
+Pin-Priority: 600
+EOF
+		apt-get update -q
+		# shellcheck disable=SC2086
+		apt-get install $APT_OPTS pdns-recursor
+	fi
+	command -v pdns_recursor >/dev/null 2>&1 || die "pdns-recursor was not installed"
+	say "$(pdns_recursor --version 2>&1 | head -n 1)"
+	systemctl enable pdns-recursor >/dev/null 2>&1
+else
+	# The package would point this host's resolv.conf at itself; keep the host's resolver.
+	systemctl mask unbound-resolvconf.service >/dev/null 2>&1 || true
+	if ! command -v unbound >/dev/null 2>&1; then
+		say "installing Unbound"
+		apt-get update -q
+		# shellcheck disable=SC2086
+		apt-get install $APT_OPTS unbound
+	fi
+	command -v unbound >/dev/null 2>&1 || die "unbound was not installed"
+	say "Unbound $(unbound -V 2>/dev/null | sed -n 's/^Version //p' | head -n 1)"
+	systemctl enable unbound >/dev/null 2>&1
+fi
+
+# ── 4. agent binary (sha256-verified) ───────────────────────────────────────
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+say "downloading dnsjos-agent (linux/$ARCH)"
+curl -fsSL "$PANEL_URL/dl/agent/linux/$ARCH" -o "$TMP/dnsjos-agent" ||
+	die "agent download failed: $PANEL_URL/dl/agent/linux/$ARCH"
+WANT=$(curl -fsSL "$PANEL_URL/dl/agent/linux/$ARCH.sha256" | awk '{print $1; exit}')
+GOT=$(sha256sum "$TMP/dnsjos-agent" | awk '{print $1}')
+if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
+	die "agent checksum mismatch (want '$WANT', got '$GOT')"
+fi
+install -m 0755 "$TMP/dnsjos-agent" "$AGENT_BIN.new"
+mv -f "$AGENT_BIN.new" "$AGENT_BIN"
+
+# ── 5. enroll (skipped when already enrolled; tokens are single-use) ────────
+if [ -s "$AGENT_CONF" ]; then
+	say "already enrolled ($AGENT_CONF exists); delete it and re-run with a new token to re-enroll"
+else
+	say "enrolling with the panel"
+	"$AGENT_BIN" enroll --recursor --kind "$KIND" --panel "$PANEL_URL" --token "$TOKEN" || die "enrollment failed"
+	[ -s "$AGENT_CONF" ] || die "enrollment did not write $AGENT_CONF"
+fi
+
+# ── 6. systemd service ──────────────────────────────────────────────────────
+cat >"$UNIT" <<'EOF'
+[Unit]
+Description=DnsJos recursor agent (manages the recursive resolver)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dnsjos-agent run
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=5min
+StateDirectory=dnsjos
+StateDirectoryMode=0711
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable dnsjos-agent >/dev/null 2>&1
+systemctl restart dnsjos-agent
+
+ID=$(sed -n 's/.*"node_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AGENT_CONF" | head -n 1)
+say "done: recursor $(hostname) (id ${ID:-unknown}) is managed by $PANEL_URL"
+say "the agent writes the resolver config within seconds; logs: journalctl -u dnsjos-agent -f"

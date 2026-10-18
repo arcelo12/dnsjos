@@ -17,6 +17,8 @@ func (s *svc) retention(ctx context.Context) error {
 	}{
 		{"metrics_minutely", "DELETE FROM metrics_minutely WHERE ts < now() - make_interval(days => $1)",
 			[]any{set.MetricsRetentionDays}, set.MetricsRetentionDays > 0},
+		{"recursor_metrics_minutely", "DELETE FROM recursor_metrics_minutely WHERE ts < now() - make_interval(days => $1)",
+			[]any{set.MetricsRetentionDays}, set.MetricsRetentionDays > 0},
 		{"blocked_daily", "DELETE FROM blocked_daily WHERE day < current_date - $1::int",
 			[]any{set.BlockedRetentionDays}, set.BlockedRetentionDays > 0},
 		{"ingested_batches", "DELETE FROM ingested_batches WHERE at < now() - interval '7 days'", nil, true},

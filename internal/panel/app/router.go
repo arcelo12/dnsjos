@@ -27,6 +27,7 @@ type ctxKey int
 const (
 	userKey ctxKey = iota
 	nodeKey
+	recursorKey
 )
 
 // UserFrom returns the authenticated user (set by Viewer/Session/Admin routes).
@@ -47,6 +48,12 @@ func UserIDFrom(ctx context.Context) *string {
 // NodeIDFrom returns the node id authenticated by an Agent route.
 func NodeIDFrom(ctx context.Context) string {
 	id, _ := ctx.Value(nodeKey).(string)
+	return id
+}
+
+// RecursorIDFrom returns the recursor id authenticated by a Recursor route.
+func RecursorIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(recursorKey).(string)
 	return id
 }
 
@@ -160,6 +167,29 @@ func (rt *Router) Agent(pattern string, h http.HandlerFunc) {
 			return
 		}
 		h(w, r.WithContext(context.WithValue(r.Context(), nodeKey, id)))
+	}))
+}
+
+// Recursor registers a route authenticated by a recursor bearer token (SPEC §20). Node
+// and recursor tokens live in different tables, so neither opens the other's routes.
+func (rt *Router) Recursor(pattern string, h http.HandlerFunc) {
+	rt.mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || tok == "" {
+			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "bearer token required")
+			return
+		}
+		var id string
+		err := rt.d.Pool.QueryRow(r.Context(),
+			"SELECT id FROM recursors WHERE token_hash = $1 AND deleted_at IS NULL", HashToken(tok)).Scan(&id)
+		if db.IsNotFound(err) {
+			httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "unknown recursor token")
+			return
+		} else if err != nil {
+			httpx.WriteDBError(w, r, err)
+			return
+		}
+		h(w, r.WithContext(context.WithValue(r.Context(), recursorKey, id)))
 	}))
 }
 
