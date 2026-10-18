@@ -49,9 +49,15 @@ func EnrollRecursor(ctx context.Context, o Options, panelURL, token, kind, name 
 	if host == "" {
 		host, _ = os.Hostname()
 	}
+	// A host with a public IPv4 of its own reports it: the panel would otherwise take the
+	// request's source, which is IPv6 on a dual-stack host and the NAT address behind NAT.
+	var public string
+	if ip := localIPv4(); ip.IsGlobalUnicast() && !ip.IsPrivate() && !netip.MustParsePrefix("100.64.0.0/10").Contains(ip) {
+		public = ip.String()
+	}
 	cl := client.New(panelURL, "", o.Version)
 	resp, err := cl.EnrollRecursor(ctx, api.RecursorEnrollRequest{Token: token, Hostname: host, Kind: kind, OS: osName(),
-		Arch: runtime.GOARCH, AgentVersion: o.Version, ResolverVersion: resolverVersion(ctx, execRunner, kind)})
+		Arch: runtime.GOARCH, AgentVersion: o.Version, ResolverVersion: resolverVersion(ctx, execRunner, kind), PublicIP: public})
 	if err != nil {
 		return fmt.Errorf("enroll: %w", err)
 	}
@@ -89,16 +95,22 @@ type recAgent struct {
 
 	opMu sync.Mutex     // serialises applies, restarts and the agent upgrade
 	ops  sync.WaitGroup // command goroutines; RunRecursor waits for them
+	// failed is the rendered content whose apply failed (guarded by opMu): it is not
+	// retried until the config, the host facts or a reapply change it, so a bad config
+	// does not restart the resolver on every poll.
+	failed, failedErr string
+	memMB             int64
 
-	mu       sync.Mutex
-	cfg      *api.RecursorConfig
-	seen     int // version of cfg (sent as ETag)
-	applied  int
-	applyErr string
-	resVer   string
-	acks     []int64
-	marker   *agentMarker
-	lastUp   *api.UpgradeResult
+	mu        sync.Mutex
+	cfg       *api.RecursorConfig
+	seen      int // version of cfg (sent as ETag)
+	applied   int
+	applyErr  string
+	resVer    string
+	acks      []int64
+	marker    *agentMarker
+	lastUp    *api.UpgradeResult
+	upgrading bool // an agent upgrade runs; a second one is dropped
 
 	pollNow, forceNow, hbNow chan struct{}
 }
@@ -143,6 +155,7 @@ func newRecAgent(ctx context.Context, o Options) (*recAgent, error) {
 		os: osName(), start: time.Now(), sleep: time.Sleep,
 		pollNow: make(chan struct{}, 1), forceNow: make(chan struct{}, 1), hbNow: make(chan struct{}, 1)}
 	a.facts, a.probe = a.hostFacts, probeResolver
+	a.memMB = collect.System(o.path(DataDir)).MemTotalMB
 	a.marker, a.lastUp = loadUpgradeState(o)
 	a.resVer = resolverVersion(ctx, a.run, a.kind)
 	return a, nil
@@ -150,9 +163,12 @@ func newRecAgent(ctx context.Context, o Options) (*recAgent, error) {
 
 // hostFacts: the resolver answers on the local IPv4 holding the default route (behind
 // NAT that is the private address; the panel knows the public one) and on the global
-// IPv6 source address when there is one.
+// IPv6 source address when there is one. They are read on every config poll, so an
+// address that comes up late (boot, DHCP) or changes is picked up.
+// ponytail: a rotating IPv6 privacy address restarts the resolver when it changes; servers
+// rarely use them, listen on every global address if one ever does.
 func (a *recAgent) hostFacts() resolver.Facts {
-	f := resolver.Facts{Threads: min(runtime.NumCPU(), 8), MemMB: collect.System(a.o.path(DataDir)).MemTotalMB}
+	f := resolver.Facts{Threads: min(runtime.NumCPU(), 8), MemMB: a.memMB}
 	if ip := localIPv4(); ip.IsValid() {
 		f.ListenIPs = append(f.ListenIPs, ip.String())
 	}
@@ -226,6 +242,8 @@ func (a *recAgent) configLoop(ctx context.Context) {
 	}
 }
 
+// pollConfig fetches the config and applies it. A 304 re-applies the cached one, which
+// does nothing unless the host's addresses changed or an earlier apply failed for them.
 func (a *recAgent) pollConfig(ctx context.Context, force bool) {
 	a.mu.Lock()
 	ver := a.seen
@@ -233,27 +251,32 @@ func (a *recAgent) pollConfig(ctx context.Context, force bool) {
 	if force {
 		ver = 0
 	}
-	cfg, err := a.cl.RecursorConfig(ctx, ver)
+	fresh, err := a.cl.RecursorConfig(ctx, ver)
 	if err != nil {
 		if ctx.Err() == nil {
 			a.o.Log.Warn("fetching config failed", "err", err)
 		}
 		return
 	}
-	if cfg == nil { // 304: unchanged (a forced poll sends no ETag, so it never gets one)
+	a.mu.Lock()
+	if fresh != nil {
+		a.cfg, a.seen = fresh, fresh.Version
+	}
+	cfg := a.cfg
+	a.mu.Unlock()
+	if cfg == nil {
 		return
 	}
-	a.mu.Lock()
-	a.cfg, a.seen = cfg, cfg.Version
-	a.mu.Unlock()
 	a.opMu.Lock()
 	changed, err := a.apply(ctx, cfg, force)
 	a.opMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
-		a.applyErr = fmt.Sprintf("config v%d: %v", cfg.Version, err)
-		a.o.Log.Error("config apply failed", "version", cfg.Version, "err", err)
+		if msg := fmt.Sprintf("config v%d: %v", cfg.Version, err); msg != a.applyErr {
+			a.applyErr = msg
+			a.o.Log.Error("config apply failed", "version", cfg.Version, "err", err)
+		}
 		return
 	}
 	a.applied, a.applyErr = cfg.Version, ""
@@ -271,6 +294,10 @@ func (a *recAgent) apply(ctx context.Context, cfg *api.RecursorConfig, force boo
 	main, acl, err := resolver.Render(*cfg, a.facts())
 	if err != nil {
 		return false, err // nothing written: the resolver keeps its config
+	}
+	key := main.Content + "\x00" + acl.Content
+	if key == a.failed && !force {
+		return false, errors.New(a.failedErr)
 	}
 	files := []resolver.File{main, acl}
 	old := make([][]byte, len(files))
@@ -309,10 +336,14 @@ func (a *recAgent) apply(ctx context.Context, cfg *api.RecursorConfig, force boo
 	if err := a.activate(ctx, changed[0] || force); err != nil {
 		restore()
 		if rerr := a.restartResolver(ctx); rerr != nil {
-			return false, fmt.Errorf("%w; previous config restored but the resolver did not start: %v", err, rerr)
+			err = fmt.Errorf("%w; previous config restored but the resolver did not start: %v", err, rerr)
+		} else {
+			err = fmt.Errorf("%w; previous config restored", err)
 		}
-		return false, fmt.Errorf("%w; previous config restored", err)
+		a.failed, a.failedErr = key, err.Error()
+		return false, err
 	}
+	a.failed, a.failedErr = "", ""
 	return true, nil
 }
 
@@ -475,10 +506,19 @@ func (a *recAgent) command(ctx context.Context, c api.Command) {
 			}
 		})
 	case api.CmdUpgradeAgent:
+		a.mu.Lock()
+		busy := a.upgrading
+		a.upgrading = true
+		a.mu.Unlock()
+		if busy { // two upgrades at once would swap .prev for the new binary: no way back
+			a.o.Log.Warn("agent upgrade already running, command dropped", "id", c.ID)
+			break
+		}
 		a.ops.Go(func() {
 			if err := replaceAgentBinary(ctx, a.o, a.cl); err != nil {
 				a.mu.Lock()
 				a.lastUp = &api.UpgradeResult{Kind: api.UpgradeAgent, From: a.o.Version, Error: err.Error(), At: time.Now().UTC()}
+				a.upgrading = false
 				a.mu.Unlock()
 				a.o.Log.Error("agent upgrade failed", "err", err)
 				poke(a.hbNow)

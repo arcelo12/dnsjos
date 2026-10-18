@@ -115,7 +115,7 @@ export default function RecursorDetailPage() {
           <RecursorOverviewTab rec={rec} live={live.data} />
         </TabsContent>
         <TabsContent value="settings" className="mt-2">
-          <RecursorSettingsTab key={rec.desired_config_version} rec={rec} />
+          <RecursorSettingsTab key={JSON.stringify([rec.settings, rec.public_ip])} rec={rec} />
         </TabsContent>
         {isAdmin && (
           <TabsContent value="actions" className="mt-2">

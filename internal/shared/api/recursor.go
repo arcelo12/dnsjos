@@ -29,10 +29,19 @@ const (
 	MaxRecursorECSZones = 100
 	MinRecursorCacheMB  = 32
 	MaxRecursorCacheMB  = 65536
-	// Manual allow-list entries must not open the resolver to the internet.
-	MinAllowPrefixV4 = 8
-	MinAllowPrefixV6 = 16
+	// Manual allow-list entries must not open the resolver to the internet: public space
+	// needs at least these prefix lengths; private ranges may be allowed whole.
+	MinAllowPrefixV4 = 16
+	MinAllowPrefixV6 = 32
 )
+
+// privateRanges may be allowed as a whole (10/8, a whole ULA block, …): they never reach
+// the resolver from the internet.
+var privateRanges = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("fc00::/7"),
+}
 
 // RecursorSettings are the panel-managed resolver settings. Every live node is allowed
 // automatically; AllowExtra adds addresses or CIDRs (monitoring hosts, private networks).
@@ -90,8 +99,13 @@ func CheckAllowEntry(s string) error {
 	if err != nil {
 		return err
 	}
+	for _, r := range privateRanges {
+		if r.Bits() <= p.Bits() && r.Contains(p.Addr()) {
+			return nil
+		}
+	}
 	if p.Addr().Is4() && p.Bits() < MinAllowPrefixV4 || p.Addr().Is6() && p.Bits() < MinAllowPrefixV6 {
-		return fmt.Errorf("%q is too wide (at least /%d for IPv4, /%d for IPv6): it would open the resolver to the internet",
+		return fmt.Errorf("%q is too wide: public networks need at least /%d (IPv4) or /%d (IPv6), so the resolver never opens to the internet",
 			s, MinAllowPrefixV4, MinAllowPrefixV6)
 	}
 	return nil

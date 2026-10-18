@@ -56,7 +56,7 @@ export function RecursorSettingsTab({ rec }: { rec: Recursor }) {
           <div className="grid gap-1.5">
             <Label htmlFor="rec-allow">Extra addresses / CIDRs</Label>
             <Textarea id="rec-allow" rows={3} readOnly={ro} value={allow} onChange={(e) => setAllow(e.target.value)} placeholder={'203.0.113.10\n10.20.0.0/16'} className="font-mono text-xs" />
-            <p className="text-xs text-muted-foreground">At least /8 for IPv4 and /16 for IPv6, so the resolver never opens to the internet.</p>
+            <p className="text-xs text-muted-foreground">Public networks need at least /16 (IPv4) or /32 (IPv6); private ranges (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7) may be added whole.</p>
           </div>
           <details className="text-xs">
             <summary className="cursor-pointer text-muted-foreground">Automatic entries ({automatic.length})</summary>
@@ -104,9 +104,9 @@ export function RecursorSettingsTab({ rec }: { rec: Recursor }) {
             <p className="text-xs text-muted-foreground">0 = sized from the host's RAM.</p>
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="rec-ip">Public IPv4</Label>
+            <Label htmlFor="rec-ip">Public IP</Label>
             <Input id="rec-ip" readOnly={ro} value={publicIP} onChange={(e) => setPublicIP(e.target.value)} className="font-mono" />
-            <p className="text-xs text-muted-foreground">The address nodes query; also sent as the location of queries without a client subnet.</p>
+            <p className="text-xs text-muted-foreground">The address nodes query. An IPv4 one is also sent as the location of queries without a client subnet.</p>
           </div>
         </CardContent>
       </Card>

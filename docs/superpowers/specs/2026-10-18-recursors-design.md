@@ -27,7 +27,8 @@ panel, and an easy pick from the node side.
      node's IPs are removed. Plus a manual list of extra IPs/CIDRs (e.g. a monitoring
      host, a node reaching it over a private network). Loopback always allowed. Never an
      open resolver: an empty list means only loopback, and the manual list rejects
-     prefixes shorter than /8 (IPv4) or /16 (IPv6).
+     public prefixes shorter than /16 (IPv4) or /32 (IPv6); private ranges may be added whole
+     (tightened after review: a public /8 is effectively open).
      *Claude's call (user asleep):* "nodes that use it" is shown on the page, but the
      allow-list covers all fleet nodes. Deriving it from profile usage races with
      publishes and staged rollouts (a node starts querying before the recursor allowed

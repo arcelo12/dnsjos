@@ -1264,7 +1264,9 @@ panel installs, configures and monitors it; `dnsjos-agent` runs on it in **recur
 * **Allow-list**: loopback + every live node's `public_ip` and heartbeat `public_ipv6` + the
   extra entries. The whole fleet is allowed, not only the nodes using the recursor, so a
   profile publish or staged rollout never has a node querying before it is allowed. Extra
-  entries narrower than /8 (IPv4) or /16 (IPv6) only; the agent drops anything else again.
+  entries in public space must be at least /16 (IPv4) or /32 (IPv6); private ranges (10/8,
+  172.16/12, 192.168/16, 100.64/10, fc00::/7) may be added whole. The agent drops anything
+  else again.
   The config version changes with any input, so a node joining or leaving reaches every
   recursor with its next heartbeat.
 * **Rendering** (`internal/agent/resolver`): PowerDNS `recursor.d/dnsjos.yml` + the ACL file

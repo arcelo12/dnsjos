@@ -228,3 +228,90 @@ func TestEnrollRecursorWritesRole(t *testing.T) {
 		t.Fatalf("agent.json %+v", c)
 	}
 }
+
+func TestRecursorReappliesOnHostChangeOnly(t *testing.T) {
+	var gets int
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets++
+		if r.Header.Get("If-None-Match") == `"1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		json.NewEncoder(w).Encode(recCfg("198.51.100.10/32"))
+	}))
+	defer panel.Close()
+	a, sys := testRecAgent(t, panel.URL)
+	listen := "10.0.0.43"
+	a.facts = func() resolver.Facts { return resolver.Facts{ListenIPs: []string{listen}, Threads: 1, MemMB: 1024} }
+	ctx := context.Background()
+	a.pollConfig(ctx, false)
+	// The address came up late / changed: a 304 still re-renders and restarts on it.
+	listen = "10.0.0.44"
+	sys.reset()
+	a.pollConfig(ctx, false)
+	if !sys.ran("systemctl restart pdns-recursor") || !strings.Contains(readRec(t, a, resolver.PDNSMain), "10.0.0.44:53") {
+		t.Fatalf("listen address change not applied: %v", sys.cmds)
+	}
+	sys.reset()
+	a.pollConfig(ctx, false) // 304, nothing changed: nothing runs
+	if len(sys.cmds) != 0 {
+		t.Fatalf("unchanged poll ran %v", sys.cmds)
+	}
+	// No network yet: nothing is written, the running config stays.
+	listen = ""
+	a.facts = func() resolver.Facts { return resolver.Facts{Threads: 1, MemMB: 1024} }
+	a.pollConfig(ctx, false)
+	if a.applyErr == "" || !strings.Contains(readRec(t, a, resolver.PDNSMain), "10.0.0.44:53") || len(sys.cmds) != 0 {
+		t.Fatalf("no-address poll: err=%q cmds=%v", a.applyErr, sys.cmds)
+	}
+}
+
+func TestRecursorFailedConfigNotRetriedEveryPoll(t *testing.T) {
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == `"1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		json.NewEncoder(w).Encode(recCfg("198.51.100.10/32"))
+	}))
+	defer panel.Close()
+	a, sys := testRecAgent(t, panel.URL)
+	sys.down = true
+	ctx := context.Background()
+	a.pollConfig(ctx, false)
+	if a.applyErr == "" {
+		t.Fatal("failing resolver not reported")
+	}
+	sys.reset()
+	a.pollConfig(ctx, false)
+	if sys.ran("systemctl restart") || a.applyErr == "" {
+		t.Fatalf("failed config retried on a plain poll: %v (err %q)", sys.cmds, a.applyErr)
+	}
+	sys.down = false
+	a.pollConfig(ctx, true) // reapply
+	if a.applyErr != "" || a.applied != 1 {
+		t.Fatalf("reapply after the fix: applied=%d err=%q", a.applied, a.applyErr)
+	}
+}
+
+func TestRecursorSecondUpgradeDropped(t *testing.T) {
+	var downloads int
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloads++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer panel.Close()
+	a, _ := testRecAgent(t, panel.URL)
+	a.upgrading = true // one is running
+	a.command(context.Background(), api.Command{ID: 7, Type: api.CmdUpgradeAgent})
+	a.ops.Wait()
+	if downloads != 0 || !slices.Equal(a.acks, []int64{7}) {
+		t.Fatalf("second upgrade: downloads=%d acks=%v", downloads, a.acks)
+	}
+	a.upgrading = false
+	a.command(context.Background(), api.Command{ID: 8, Type: api.CmdUpgradeAgent})
+	a.ops.Wait()
+	if downloads == 0 || a.upgrading || a.lastUp == nil || a.lastUp.Error == "" {
+		t.Fatalf("failed upgrade: downloads=%d upgrading=%v last=%+v", downloads, a.upgrading, a.lastUp)
+	}
+}

@@ -4,6 +4,7 @@
 package resolver
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -75,7 +76,9 @@ func Render(c api.RecursorConfig, f Facts) (main, acl File, err error) {
 	return main, acl, fmt.Errorf("unknown resolver kind %q", c.Kind)
 }
 
-// listenAddrs validates the local addresses and adds the loopback the agent probes.
+// listenAddrs validates the local addresses and adds the loopback the agent probes. With
+// no other address (the network is not up yet) it fails: a loopback-only resolver would
+// pass the local probe while every node times out.
 func listenAddrs(ips []string) ([]netip.Addr, error) {
 	out := []netip.Addr{netip.MustParseAddr("127.0.0.1")}
 	for _, s := range ips {
@@ -83,9 +86,12 @@ func listenAddrs(ips []string) ([]netip.Addr, error) {
 		if err != nil || a.Zone() != "" || a.IsUnspecified() {
 			return nil, fmt.Errorf("listen address %q is not a usable IP address", s)
 		}
-		if a = a.Unmap(); !slices.Contains(out, a) {
+		if a = a.Unmap(); !a.IsLoopback() && !slices.Contains(out, a) {
 			out = append(out, a)
 		}
+	}
+	if len(out) == 1 {
+		return nil, errors.New("no local address to listen on yet (is the network up?)")
 	}
 	return out, nil
 }

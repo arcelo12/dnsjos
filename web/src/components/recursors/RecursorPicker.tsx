@@ -11,7 +11,7 @@ import { kindLabel } from './kinds'
 /** The upstream a recursor stands for: its public address on :53, ECS as the recursor has it. */
 const recursorUpstream = (r: Recursor): Upstream => ({
   name: r.name,
-  address: `${r.public_ip}:53`,
+  address: r.public_ip.includes(':') ? `[${r.public_ip}]:53` : `${r.public_ip}:53`,
   weight: 10,
   order: 1,
   sockets: 4,

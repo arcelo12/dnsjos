@@ -81,7 +81,7 @@ func TestRenderUnbound(t *testing.T) {
 	has(t, "unbound acl", acl.Content, "server:\n", "access-control: 198.51.100.99/32 allow", "access-control: ::1/128 allow")
 	hasNot(t, "unbound acl", acl.Content, "0.0.0.0/0")
 
-	main, _, _ = Render(cfg(api.RecursorUnbound, api.RecursorSettings{CacheMB: 1000}), Facts{UnboundControl: true, Threads: 3})
+	main, _, _ = Render(cfg(api.RecursorUnbound, api.RecursorSettings{CacheMB: 1000}), Facts{ListenIPs: []string{"192.0.2.53"}, UnboundControl: true, Threads: 3})
 	has(t, "unbound plain", main.Content, "rrset-cache-size: 400m", "rrset-cache-slabs: 4")
 	hasNot(t, "unbound plain", main.Content, "module-config", "remote-control:")
 }
@@ -96,14 +96,16 @@ func TestRenderRejects(t *testing.T) {
 			t.Errorf("%s: rendered", name)
 		}
 	}
-	if _, _, err := Render(cfg(api.RecursorPDNS, api.RecursorSettings{}), Facts{ListenIPs: []string{"0.0.0.0"}}); err == nil {
-		t.Error("wildcard listen address rendered")
+	for _, ips := range [][]string{{"0.0.0.0"}, nil, {"127.0.0.1"}} {
+		if _, _, err := Render(cfg(api.RecursorPDNS, api.RecursorSettings{}), Facts{ListenIPs: ips}); err == nil {
+			t.Errorf("listen %v rendered", ips)
+		}
 	}
 }
 
 func TestSafeAllow(t *testing.T) {
-	got := SafeAllow([]string{"0.0.0.0/0", "1.2.3.4", "bad", "::/0", "1.2.3.4/32", "10.0.0.0/4", "198.51.100.9/24"})
-	want := []string{"1.2.3.4/32", "127.0.0.0/8", "198.51.100.0/24", "::1/128"}
+	got := SafeAllow([]string{"0.0.0.0/0", "1.2.3.4", "bad", "::/0", "1.2.3.4/32", "10.0.0.0/4", "198.51.100.9/24", "45.0.0.0/8", "10.0.0.0/8"})
+	want := []string{"1.2.3.4/32", "10.0.0.0/8", "127.0.0.0/8", "198.51.100.0/24", "::1/128"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("SafeAllow = %v, want %v", got, want)
 	}

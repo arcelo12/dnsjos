@@ -7,7 +7,8 @@ import (
 )
 
 func TestRecursorSettingsValidate(t *testing.T) {
-	ok := RecursorSettings{AllowExtra: []string{"203.0.113.7", "198.51.100.0/24", "2001:db8::/48", "10.0.0.0/8"},
+	ok := RecursorSettings{AllowExtra: []string{"203.0.113.7", "198.51.100.0/24", "2001:db8::/48", "10.0.0.0/8",
+		"172.16.0.0/12", "100.64.0.0/10", "fd00::/8", "45.12.0.0/16", "2a00:1450::/32"},
 		ECS: true, ECSZones: []string{"googlevideo.com", "akamaiedge.net"}, CacheMB: 512}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("valid settings rejected: %v", err)
@@ -24,6 +25,10 @@ func TestRecursorSettingsValidate(t *testing.T) {
 		"v6 any":     {AllowExtra: []string{"::/0"}},
 		"wide v4":    {AllowExtra: []string{"10.0.0.0/4"}},
 		"wide v6":    {AllowExtra: []string{"2000::/3"}},
+		"public /8":  {AllowExtra: []string{"45.0.0.0/8"}},
+		"public /15": {AllowExtra: []string{"45.12.0.0/15"}},
+		"rir v6":     {AllowExtra: []string{"2001::/16"}},
+		"v6 /31":     {AllowExtra: []string{"2a00:1450::/31"}},
 		"garbage":    {AllowExtra: []string{"nope"}},
 		"zone":       {AllowExtra: []string{"fe80::1%eth0"}},
 		"too many":   {AllowExtra: many},

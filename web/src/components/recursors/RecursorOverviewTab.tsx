@@ -103,7 +103,7 @@ export function RecursorOverviewTab({ rec, live }: { rec: Recursor; live: Recurs
             <CardTitle className="text-sm">Network</CardTitle>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-3 px-4 text-sm">
-            <Fact label="Public IPv4 (nodes use this)" value={<span className="font-mono">{rec.public_ip || '—'}</span>} />
+            <Fact label="Public IP (nodes use this)" value={<span className="font-mono">{rec.public_ip || '—'}</span>} />
             <Fact label="Listens on" value={<span className="font-mono">{rec.listen_ip ? `${rec.listen_ip}:53` : '—'}</span>} />
             <Fact label="IPv6" value={<span className="font-mono">{rec.listen_ipv6 || 'none'}</span>} />
             <Fact label="Test lookup" value={hb ? (hb.probe_ok ? fmtMs(hb.probe_ms) : 'failing') : '—'} />
