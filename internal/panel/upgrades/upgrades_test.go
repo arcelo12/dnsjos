@@ -216,7 +216,7 @@ func TestRollingDnsdist(t *testing.T) {
 		t.Fatalf("failed attempt: %s %q", statuses(u), u.Message)
 	}
 
-	e.run("UPDATE nodes SET status = 'offline' WHERE id = $1", b)
+	e.run("UPDATE nodes SET status = 'degraded' WHERE id = $1", b)
 	e.call(409, "POST", "/api/v1/upgrades/"+itoa(u.ID)+"/resume", nil, nil)
 	e.run("UPDATE nodes SET status = 'online' WHERE id = $1", b)
 	e.call(200, "POST", "/api/v1/upgrades/"+itoa(u.ID)+"/resume", nil, &u)
@@ -297,6 +297,23 @@ func TestPausesWhenFleetUnhealthy(t *testing.T) {
 	e.scalar("SELECT count(*) FROM node_commands WHERE node_id = $1", &n, b)
 	if n != 0 {
 		t.Fatalf("ns-b got %d commands", n)
+	}
+}
+
+// An offline node left out of the run does not block it; picked, it does.
+func TestOfflineNodeOutsideRun(t *testing.T) {
+	e := setup(t)
+	a := e.node("ns-a", "2.0.0-1", 0)
+	b := e.node("ns-b", "2.0.0-1", 10)
+	e.run("UPDATE nodes SET status = 'offline' WHERE id = $1", a)
+	if eb := e.call(409, "POST", "/api/v1/upgrades", api.UpgradeRunCreate{Kind: api.UpgradeAgent, NodeIDs: []string{a, b}}, nil); !strings.Contains(eb.Error.Message, "ns-a (offline)") {
+		t.Fatalf("picked offline node: %+v", eb)
+	}
+	var u api.UpgradeRun
+	e.call(201, "POST", "/api/v1/upgrades", api.UpgradeRunCreate{Kind: api.UpgradeAgent, NodeIDs: []string{b}}, &u)
+	e.tick()
+	if u = e.get(u.ID); statuses(u) != "running ns-b=running" {
+		t.Fatalf("%s %q", statuses(u), u.Message)
 	}
 }
 

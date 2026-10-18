@@ -151,11 +151,14 @@ func (s *svc) get(w http.ResponseWriter, r *http.Request) {
 // upgrade command). A node counts as upgrading while its heartbeat says so, or while an
 // upgrade/series command for it is queued or delivered with no heartbeat since.
 // A node with a running step of run ownRun counts only by its status (resuming a paused
-// run while its own node upgrades). A config rollout ignores offline nodes: they serve
-// nothing, and their step is skipped. Callers hold db.LockUpgrades.
+// run while its own node upgrades). Offline nodes serve nothing, so they count only while
+// they have a step of run ownRun still to do; a config rollout ignores them entirely (their
+// step is skipped). Callers hold db.LockUpgrades.
 func notReady(ctx context.Context, q db.Querier, ownRun int64, config bool) error {
 	rows, _ := q.Query(ctx, `SELECT n.name || ' (' || CASE WHEN n.status <> 'online' THEN n.status ELSE 'upgrading' END || ')'
-		FROM nodes n WHERE n.deleted_at IS NULL AND NOT ($2 AND n.status = 'offline') AND (n.status <> 'online'
+		FROM nodes n WHERE n.deleted_at IS NULL AND NOT (n.status = 'offline' AND ($2 OR NOT EXISTS (SELECT 1
+			FROM upgrade_run_steps s WHERE s.run_id = $1 AND s.node_id = n.id AND s.status IN ('pending', 'running'))))
+		AND (n.status <> 'online'
 			OR NOT EXISTS (SELECT 1 FROM upgrade_run_steps s WHERE s.run_id = $1 AND s.node_id = n.id AND s.status = 'running')
 			AND (coalesce((n.last_heartbeat->>'upgrade_in_progress')::bool, false)
 			OR EXISTS (SELECT 1 FROM node_commands c WHERE c.node_id = n.id
@@ -248,9 +251,6 @@ func (s *svc) create(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if err := notReady(ctx, tx, 0, false); err != nil {
-			return err
-		}
 		if err := tx.QueryRow(ctx, `INSERT INTO upgrade_runs (kind, target_version, created_by, created_at)
 			VALUES ($1, $2, $3, $4) RETURNING id`, c.Kind, c.TargetVersion, app.UserIDFrom(ctx), s.now()).Scan(&runID); err != nil {
 			return err
@@ -261,6 +261,9 @@ func (s *svc) create(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO upgrade_run_steps (run_id, position, node_id, to_version)
 			SELECT $1, ord - 1, id, $3 FROM unnest($2::uuid[]) WITH ORDINALITY AS t(id, ord)`, runID, ids, c.TargetVersion); err != nil {
+			return err
+		}
+		if err := notReady(ctx, tx, runID, false); err != nil { // after the steps: an offline node blocks only if picked
 			return err
 		}
 		return audit.Record(r, tx, "upgrade.create", "upgrade_run", strconv.FormatInt(runID, 10), c)
