@@ -10,14 +10,17 @@ import { useId, type ReactNode } from 'react'
 
 import type { MetricRow } from './metrics'
 
-type Key = Exclude<keyof MetricRow, 'ts'>
+/** Any chart row: a timestamp plus numeric series (node MetricRow, recursor rows). */
+export interface ChartRow {
+  ts: number
+}
 
-export interface MetricChartProps {
+export interface MetricChartProps<R extends ChartRow = MetricRow> {
   title: string
   description?: ReactNode
   action?: ReactNode
-  rows: MetricRow[]
-  series: { key: Key; label: string; color: string }[]
+  rows: R[]
+  series: { key: Exclude<keyof R, 'ts'> & string; label: string; color: string }[]
   kind?: 'area' | 'line'
   unit?: string
   domain?: [number, number]
@@ -26,7 +29,7 @@ export interface MetricChartProps {
   spanS?: number
 }
 
-export function MetricChart({ title, description, action, rows, series, kind = 'area', unit = '', domain, loading, spanS = 6 * 3600 }: MetricChartProps) {
+export function MetricChart<R extends ChartRow = MetricRow>({ title, description, action, rows, series, kind = 'area', unit = '', domain, loading, spanS = 6 * 3600 }: MetricChartProps<R>) {
   const gid = useId().replace(/:/g, '')
   const config = Object.fromEntries(series.map((s) => [s.key, { label: s.label, color: s.color }])) satisfies ChartConfig
   const tick = (t: number) =>
@@ -35,7 +38,7 @@ export function MetricChart({ title, description, action, rows, series, kind = '
     <>
       <CartesianGrid vertical={false} />
       <XAxis dataKey="ts" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={tick} tickLine={false} axisLine={false} minTickGap={40} />
-      <YAxis width={44} tickLine={false} axisLine={false} domain={domain} tickFormatter={(v: number) => fmtCompact(v) + unit} />
+      <YAxis width={44} tickLine={false} axisLine={false} domain={domain} tickFormatter={(v: number) => (v > 0 && v < 1 ? String(+v.toFixed(2)) : fmtCompact(v)) + unit} />
       <ChartTooltip
         content={<ChartTooltipContent indicator="line" labelFormatter={(_, p) => fmtDateTime(new Date(Number(p[0]?.payload?.ts)).toISOString())} />}
       />

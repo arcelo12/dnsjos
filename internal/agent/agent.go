@@ -52,11 +52,14 @@ type Options struct {
 
 func (o Options) path(p string) string { return filepath.Join(o.Root, p) }
 
-// Config is /etc/dnsjos/agent.json.
+// Config is /etc/dnsjos/agent.json. A recursor (Role RoleRecursor, SPEC §20) keeps its
+// id and token in NodeID/NodeToken and its resolver in Kind.
 type Config struct {
 	PanelURL  string `json:"panel_url"`
 	NodeID    string `json:"node_id"`
 	NodeToken string `json:"node_token"`
+	Role      string `json:"role,omitempty"`
+	Kind      string `json:"kind,omitempty"`
 }
 
 // Secrets are generated on first run and never leave the node.

@@ -57,6 +57,13 @@ import type {
   User,
   UserCreate,
   UserPatch,
+  Recursor,
+  RecursorLive,
+  RecursorMetricSeries,
+  RecursorPatch,
+  RecursorToken,
+  RecursorTokenCreate,
+  RecursorTokenCreated,
 } from './types'
 
 // ─── fetch wrapper ─────────────────────────────────────────────────────────
@@ -174,6 +181,20 @@ export const api = {
     dualstack: (id: string) => get<DualStackReport>(`${V1}/nodes/${id}/dualstack`),
     speedcheck: (id: string) => get<SpeedCheckReport>(`${V1}/nodes/${id}/speedcheck`),
   },
+  recursors: {
+    list: () => get<List<Recursor>>(`${V1}/recursors`),
+    get: (id: string) => get<Recursor>(`${V1}/recursors/${id}`),
+    update: (id: string, p: RecursorPatch) => patch<Recursor>(`${V1}/recursors/${id}`, p),
+    remove: (id: string) => del(`${V1}/recursors/${id}`),
+    live: (id: string) => get<RecursorLive>(`${V1}/recursors/${id}/live`),
+    metrics: (id: string, q: MetricsQuery = {}) => get<RecursorMetricSeries>(`${V1}/recursors/${id}/metrics${qs({ ...q })}`),
+    command: (id: string, c: CommandRequest) => post<Command>(`${V1}/recursors/${id}/commands`, c),
+  },
+  recursorTokens: {
+    list: () => get<List<RecursorToken>>(`${V1}/recursor-tokens`),
+    create: (t: RecursorTokenCreate) => post<RecursorTokenCreated>(`${V1}/recursor-tokens`, t),
+    remove: (id: string) => del(`${V1}/recursor-tokens/${id}`),
+  },
   enrollment: {
     list: () => get<List<EnrollmentToken>>(`${V1}/enrollment-tokens`),
     create: (t: EnrollmentTokenCreate) => post<EnrollmentTokenCreated>(`${V1}/enrollment-tokens`, t),
@@ -267,6 +288,10 @@ export const qk = {
   nodeDualStack: (id: string) => ['nodes', id, 'dualstack'] as const,
   nodeSpeedCheck: (id: string) => ['nodes', id, 'speedcheck'] as const,
   nodeVersions: (id: string) => ['nodes', id, 'versions'] as const,
+  recursors: ['recursors'] as const,
+  recursor: (id: string) => ['recursors', id] as const,
+  recursorLive: (id: string) => ['recursors', id, 'live'] as const,
+  recursorTokens: ['recursor-tokens'] as const,
   upgrades: ['upgrades'] as const,
   upgrade: (id: number) => ['upgrades', id] as const,
   meta: ['meta'] as const,
@@ -336,6 +361,12 @@ export const useNodeSpeedCheck = (id: string) =>
   useQuery({ queryKey: qk.nodeSpeedCheck(id), queryFn: () => api.nodes.speedcheck(id), refetchInterval: 60_000 })
 export const useNodeVersions = (id: string) =>
   useQuery({ queryKey: qk.nodeVersions(id), queryFn: () => api.nodes.versions(id), refetchInterval: LIVE })
+export const useRecursors = () => useQuery({ queryKey: qk.recursors, queryFn: api.recursors.list, refetchInterval: LIVE })
+export const useRecursor = (id: string) =>
+  useQuery({ queryKey: qk.recursor(id), queryFn: () => api.recursors.get(id), refetchInterval: LIVE })
+export const useRecursorLive = (id: string) =>
+  useQuery({ queryKey: qk.recursorLive(id), queryFn: () => api.recursors.live(id), refetchInterval: LIVE })
+export const useRecursorTokens = () => useQuery({ queryKey: qk.recursorTokens, queryFn: api.recursorTokens.list })
 export const useUpgrades = () => useQuery({ queryKey: qk.upgrades, queryFn: api.upgrades.list, refetchInterval: LIVE })
 /** Polls every 3 s while the run is running. */
 export const useUpgrade = (id: number) =>
@@ -439,6 +470,14 @@ export const useNodeCommand = () =>
 /** Renders a spec without saving it (profile editor "Preview Lua"). */
 export const usePreview = () =>
   useMutation({ mutationFn: (a: { id: string; spec: ConfigSpec }) => api.profiles.preview(a.id, a.spec) })
+
+export const useUpdateRecursor = () =>
+  useMut((a: { id: string; patch: RecursorPatch }) => api.recursors.update(a.id, a.patch), () => [qk.recursors])
+export const useDeleteRecursor = () => useMut(api.recursors.remove, () => [qk.recursors])
+export const useRecursorCommand = () =>
+  useMut(({ id, ...c }: { id: string } & CommandRequest) => api.recursors.command(id, c), (a) => [qk.recursor(a.id)])
+export const useCreateRecursorToken = () => useMut(api.recursorTokens.create, () => [qk.recursorTokens])
+export const useDeleteRecursorToken = () => useMut(api.recursorTokens.remove, () => [qk.recursorTokens])
 
 export const useCreateEnrollmentToken = () => useMut(api.enrollment.create, () => [qk.enrollment])
 export const useDeleteEnrollmentToken = () => useMut(api.enrollment.remove, () => [qk.enrollment])

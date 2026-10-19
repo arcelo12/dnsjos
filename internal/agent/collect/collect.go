@@ -4,10 +4,13 @@ package collect
 import (
 	"bufio"
 	"context"
+	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/billyriantono/dnsjos/internal/agent/dnsdist"
@@ -126,6 +129,48 @@ func System(diskPath string) api.SystemStats {
 	var st syscall.Statfs_t
 	if syscall.Statfs(diskPath, &st) == nil {
 		s.DiskFreeMB = int64(uint64(st.Bavail) * uint64(st.Bsize) / (1 << 20))
+		s.DiskTotalMB = int64(uint64(st.Blocks) * uint64(st.Bsize) / (1 << 20))
+	}
+	s.CPUs = runtime.NumCPU()
+	if b, err := os.ReadFile("/proc/stat"); err == nil {
+		s.CPUPct = cpu.pct(b)
 	}
 	return s
+}
+
+// cpu remembers the previous /proc/stat totals so System can report CPU use since then.
+var cpu cpuSampler
+
+type cpuSampler struct {
+	mu          sync.Mutex
+	busy, total uint64
+}
+
+// pct parses the aggregate "cpu" line of /proc/stat and returns the busy percentage since
+// the previous call (0 on the first call or when the counters did not move).
+func (c *cpuSampler) pct(stat []byte) float64 {
+	line, _, _ := strings.Cut(string(stat), "\n")
+	f := strings.Fields(line)
+	if len(f) < 5 || f[0] != "cpu" {
+		return 0
+	}
+	var busy, total uint64
+	for i, v := range f[1:] {
+		n, _ := strconv.ParseUint(v, 10, 64)
+		if i >= 8 { // guest and guest_nice are already counted in user and nice
+			break
+		}
+		total += n
+		if i != 3 && i != 4 { // idle, iowait
+			busy += n
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	pb, pt := c.busy, c.total
+	c.busy, c.total = busy, total
+	if pt == 0 || total <= pt || busy < pb {
+		return 0
+	}
+	return math.Round(float64(busy-pb)/float64(total-pt)*1000) / 10
 }

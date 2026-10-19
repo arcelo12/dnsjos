@@ -123,3 +123,63 @@ func (s *svc) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
+
+// recursorMetrics is one recursor's series (SPEC §20), with the same range parameters.
+func (s *svc) recursorMetrics(w http.ResponseWriter, r *http.Request) {
+	from, to, step, err := parseRange(r.URL.Query(), time.Now())
+	if err != nil {
+		httpx.BadRequest(w, err.Error())
+		return
+	}
+	ctx, id := r.Context(), r.PathValue("id")
+	var exists bool
+	if err := s.d.Pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM recursors WHERE id = $1)", id).Scan(&exists); err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	} else if !exists {
+		httpx.NotFound(w)
+		return
+	}
+	rows, err := s.d.Pool.Query(ctx, `
+		SELECT date_bin($1 * interval '1 second', ts, $2) AS b,
+		       sum(queries)::bigint, sum(cache_hits)::bigint, sum(cache_misses)::bigint, sum(servfail)::bigint,
+		       sum(outgoing)::bigint,
+		       coalesce(sum(queries * latency_sum_ms / samples) FILTER (WHERE samples > 0)
+		                / nullif(sum(queries) FILTER (WHERE samples > 0), 0), 0)
+		FROM recursor_metrics_minutely
+		WHERE ts >= $2 AND ts < $3 AND recursor_id = $4
+		GROUP BY b ORDER BY b`, int64(step/time.Second), from, to, id)
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	defer rows.Close()
+	n := int((to.Sub(from) + step - 1) / step)
+	out := api.RecursorMetricSeries{From: from, To: to, StepS: int(step / time.Second), Points: make([]api.RecursorMetricSample, n)}
+	for i := range out.Points {
+		out.Points[i].TS = from.Add(time.Duration(i) * step)
+	}
+	for rows.Next() {
+		var p api.RecursorMetricSample
+		if err := rows.Scan(&p.TS, &p.Queries, &p.CacheHits, &p.CacheMisses, &p.Servfail, &p.Outgoing, &p.LatencyAvgMs); err != nil {
+			httpx.WriteDBError(w, r, err)
+			return
+		}
+		i := int(p.TS.Sub(from) / step)
+		if i < 0 || i >= n {
+			continue
+		}
+		p.TS = p.TS.UTC()
+		p.QPS, p.OutgoingQPS = float64(p.Queries)/step.Seconds(), float64(p.Outgoing)/step.Seconds()
+		p.CacheHitRatio = ratio(p.CacheHits, p.CacheMisses)
+		if p.Queries > 0 {
+			p.ServfailRatio = float64(p.Servfail) / float64(p.Queries)
+		}
+		out.Points[i] = p
+	}
+	if err := rows.Err(); err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}

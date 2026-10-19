@@ -16,3 +16,12 @@ export const useNodeRangeMetrics = (id: string, range: Range) =>
     refetchInterval: 60_000,
     placeholderData: keepPreviousData,
   })
+
+/** Recursor metrics for a sliding window ending now (same windows as nodes). */
+export const useRecursorRangeMetrics = (id: string, range: Range) =>
+  useQuery({
+    queryKey: [...qk.recursor(id), 'metrics', 'range', range],
+    queryFn: () => api.recursors.metrics(id, { from: new Date(Date.now() - RANGES[range] * 1000).toISOString() }),
+    refetchInterval: 60_000,
+    placeholderData: keepPreviousData,
+  })

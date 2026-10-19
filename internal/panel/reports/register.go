@@ -21,6 +21,7 @@ func Register(r *app.Router, d *app.Deps) {
 	r.Viewer("GET /api/v1/overview", s.overview)
 	r.Viewer("GET /api/v1/overview/metrics", s.metrics)
 	r.Viewer("GET /api/v1/nodes/{id}/metrics", s.metrics)
+	r.Viewer("GET /api/v1/recursors/{id}/metrics", s.recursorMetrics)
 	r.Viewer("GET /api/v1/reports/blocked", s.blocked)
 	r.Viewer("GET /api/v1/reports/blocked.csv", s.blockedCSV)
 	r.Viewer("GET /api/v1/offenders", s.offenders)

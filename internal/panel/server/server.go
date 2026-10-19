@@ -23,6 +23,7 @@ import (
 	"github.com/billyriantono/dnsjos/internal/panel/install"
 	"github.com/billyriantono/dnsjos/internal/panel/jobs"
 	"github.com/billyriantono/dnsjos/internal/panel/nodes"
+	"github.com/billyriantono/dnsjos/internal/panel/recursors"
 	"github.com/billyriantono/dnsjos/internal/panel/reports"
 	"github.com/billyriantono/dnsjos/internal/panel/upgrades"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
@@ -115,6 +116,7 @@ func Handler(d *app.Deps) http.Handler {
 	audit.Register(r, d)
 	registerSettings(r, d)
 	nodes.Register(r, d)
+	recursors.Register(r, d)
 	configs.Register(r, d)
 	blocklist.Register(r, d)
 	reports.Register(r, d)

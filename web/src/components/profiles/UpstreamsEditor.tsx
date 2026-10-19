@@ -1,5 +1,6 @@
 import { LuPlus, LuTrash2 } from 'react-icons/lu'
 
+import { RecursorPicker } from '@/components/recursors/RecursorPicker'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -272,9 +273,12 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
           node's — only upstreams that use it benefit (Google, a recursor with ECS on; Cloudflare ignores it).
         </p>
         {!ro && (
-          <Button type="button" variant="outline" className="w-fit" onClick={addServer}>
-            <LuPlus /> Add upstream
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" className="w-fit" onClick={addServer}>
+              <LuPlus /> Add upstream
+            </Button>
+            <RecursorPicker servers={servers} onAdd={(u) => setServers([...servers, u])} />
+          </div>
         )}
       </Section>
 

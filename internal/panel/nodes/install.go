@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/billyriantono/dnsjos/internal/panel/httpx"
@@ -14,9 +13,7 @@ import (
 // installScript serves the node installer with the panel's public URL templated in.
 func (s *svc) installScript(w http.ResponseWriter, r *http.Request) {
 	pu := strings.TrimRight(s.d.Settings.PublicURL(), "/")
-	// The URL lands inside single quotes in sh; refuse anything that could break out.
-	if u, err := url.Parse(pu); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
-		strings.ContainsAny(pu, "'\"`$\\ \t\r\n;&|<>") {
+	if !install.SafePanelURL(pu) {
 		httpx.WriteError(w, http.StatusInternalServerError, "bad_public_url",
 			"the panel public URL is not a valid http(s) URL; fix it in Settings")
 		return

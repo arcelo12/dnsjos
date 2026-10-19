@@ -1,6 +1,8 @@
-// dnsjos-agent runs on every dnsdist node (SPEC §9).
+// dnsjos-agent runs on every dnsdist node (SPEC §9) and, in recursor mode, on every
+// recursor host (SPEC §20).
 //
 //	dnsjos-agent enroll --panel URL --token T [--name NAME] [--adopt]
+//	dnsjos-agent enroll --recursor --kind pdns|unbound --panel URL --token T [--name NAME]
 //	dnsjos-agent [run] [--root DIR] [--no-systemd] [--dnsdist-web URL] [--flush-interval D]
 //	dnsjos-agent plan [--root DIR] [--no-systemd]
 //	dnsjos-agent version
@@ -34,8 +36,11 @@ func main() {
 	fs.DurationVar(&o.FlushInterval, "flush-interval", 0, "test mode: how often blocked and analytics windows are posted (default 60s)")
 	level := fs.String("log-level", "info", "debug|info|warn|error")
 	var panel, token, name string
-	var adopt bool
+	var adopt, recursor bool
+	var kind string
 	if cmd == "enroll" {
+		fs.BoolVar(&recursor, "recursor", false, "enroll this host as a recursor (PowerDNS Recursor or Unbound), not a dnsdist node")
+		fs.StringVar(&kind, "kind", "", "recursor only: the resolver installed here, pdns or unbound")
 		fs.BoolVar(&adopt, "adopt", false, "take over the live dnsdist_ootb server: import its secrets and listeners")
 		fs.StringVar(&panel, "panel", "", "panel URL, e.g. https://panel.example")
 		fs.StringVar(&token, "token", "", "enrollment token")
@@ -55,11 +60,19 @@ func main() {
 	case "version":
 		fmt.Println(version)
 	case "enroll":
-		err = agent.Enroll(ctx, o, panel, token, name, adopt)
+		if recursor {
+			err = agent.EnrollRecursor(ctx, o, panel, token, kind, name)
+		} else {
+			err = agent.Enroll(ctx, o, panel, token, name, adopt)
+		}
 	case "plan":
 		err = agent.Plan(ctx, o, os.Stdout)
 	case "run":
-		err = agent.Run(ctx, o)
+		if agent.IsRecursor(o) {
+			err = agent.RunRecursor(ctx, o)
+		} else {
+			err = agent.Run(ctx, o)
+		}
 	default:
 		err = fmt.Errorf("unknown command %q (enroll | plan | run | version)", cmd)
 	}

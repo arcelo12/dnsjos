@@ -1,5 +1,3 @@
-import type { EnrollmentToken } from './api/types.ts'
-
-/** Tokens that can still enroll a node: not used and not expired. */
-export const pendingTokens = (tokens: EnrollmentToken[], now = Date.now()) =>
+/** Tokens that can still enroll a node or recursor: not used and not expired. */
+export const pendingTokens = <T extends { used_at: string | null; expires_at: string }>(tokens: T[], now = Date.now()) =>
   tokens.filter((t) => t.used_at === null && new Date(t.expires_at).getTime() > now)
