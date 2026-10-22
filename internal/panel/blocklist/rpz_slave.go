@@ -20,7 +20,16 @@ import (
 	"github.com/billyriantono/dnsjos/internal/panel/db"
 )
 
-const rpzMaxTransferRecords = 10_000_000
+// rpzMaxZoneDomains caps how many distinct blocked domains one transfer may
+// produce. It bounds the in-RAM domain set, not raw DNS records: a transfer
+// carries SOA/duplicate records that never become domains, so the record count
+// can legitimately exceed the domain count by a wide margin.
+const rpzMaxZoneDomains = 30_000_000
+
+// rpzReadTimeout gives a 10M+ record TCP transfer room to finish. The server
+// dribbles hundreds of messages; a 60s idle deadline kills a healthy but slow
+// stream and surfaces as unpack/reset errors mid-transfer.
+const rpzReadTimeout = 20 * time.Minute
 
 // rpzUpstream mirrors one rpz_upstreams row joined to its source.
 type rpzUpstream struct {
@@ -193,30 +202,44 @@ func (s *Service) transferRPZ(ctx context.Context, up rpzUpstream) (uint32, []st
 }
 
 // axfrDomains pulls the full zone via AXFR and extracts the normalized domain list.
+// Records are processed per envelope straight into the domain set, so a 10M+
+// record zone never sits in RAM twice (raw RRs plus domains).
 func (s *Service) axfrDomains(ctx context.Context, up rpzUpstream, zone string, serial uint32) (uint32, []string, error) {
 	req := new(dns.Msg)
 	req.SetAxfr(zone)
 	up.sign(req)
-	tr := &dns.Transfer{DialTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second,
-		WriteTimeout: 5 * time.Second, TsigSecret: up.tsigSecret()}
+	tr := &dns.Transfer{DialTimeout: 30 * time.Second, ReadTimeout: rpzReadTimeout,
+		WriteTimeout: 30 * time.Second, TsigSecret: up.tsigSecret()}
 	envs, err := tr.In(req, up.Upstream)
 	if err != nil {
 		return 0, nil, fmt.Errorf("transfer: %w", err)
 	}
-	var records []dns.RR
+	seen := make(map[string]struct{})
 	for env := range envs {
 		if env.Error != nil {
 			return 0, nil, fmt.Errorf("transfer stream: %w", env.Error)
 		}
-		if len(records)+len(env.RR) > rpzMaxTransferRecords {
-			return 0, nil, fmt.Errorf("transfer exceeds %d records", rpzMaxTransferRecords)
+		for _, rr := range env.RR {
+			names, err := ownerNames(rr, zone)
+			if err != nil {
+				return 0, nil, err
+			}
+			for _, n := range names {
+				seen[n] = struct{}{}
+			}
 		}
-		records = append(records, env.RR...)
+		if len(seen) > rpzMaxZoneDomains {
+			return 0, nil, fmt.Errorf("transfer exceeds %d domains", rpzMaxZoneDomains)
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
 	}
-	domains, err := rpzOwners(records, zone)
-	if err != nil {
-		return 0, nil, err
+	domains := make([]string, 0, len(seen))
+	for n := range seen {
+		domains = append(domains, n)
 	}
+	sort.Strings(domains)
 	return serial, domains, nil
 }
 
@@ -242,13 +265,22 @@ func (s *Service) ixfrDomains(ctx context.Context, up rpzUpstream, zone string, 
 	req := new(dns.Msg)
 	req.SetIxfr(zone, up.Serial, "ns1."+zone, "hostmaster."+zone)
 	up.sign(req)
-	tr := &dns.Transfer{DialTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second,
-		WriteTimeout: 5 * time.Second, TsigSecret: up.tsigSecret()}
+	tr := &dns.Transfer{DialTimeout: 30 * time.Second, ReadTimeout: rpzReadTimeout,
+		WriteTimeout: 30 * time.Second, TsigSecret: up.tsigSecret()}
 	envs, err := tr.In(req, up.Upstream)
 	if err != nil {
 		return nil, false, fmt.Errorf("transfer: %w", err)
 	}
-	var records []dns.RR
+	// Stream the delta without retaining raw records: track only SOA markers and
+	// the ordered owner names (with a section tag) needed for the delete/add walk.
+	type deltaRec struct {
+		names   []string
+		section int // section of the SOA walk the record belongs to: 1-based
+	}
+	var delta []deltaRec
+	all := make(map[string]struct{}) // every domain seen, for the full-zone fallback
+	var firstSOA, lastSOA uint32
+	section := 0
 	soas := 0
 	for env := range envs {
 		if env.Error != nil {
@@ -256,54 +288,67 @@ func (s *Service) ixfrDomains(ctx context.Context, up rpzUpstream, zone string, 
 		}
 		for _, rr := range env.RR {
 			if rr.Header().Rrtype == dns.TypeSOA {
+				section++
 				soas++
+				if soa, ok := rr.(*dns.SOA); ok {
+					if firstSOA == 0 {
+						firstSOA = soa.Serial
+					}
+					lastSOA = soa.Serial
+				}
+				continue
 			}
-		}
-		if len(records)+len(env.RR) > rpzMaxTransferRecords {
-			return nil, false, fmt.Errorf("transfer exceeds %d records", rpzMaxTransferRecords)
-		}
-		records = append(records, env.RR...)
-	}
-	if soas < 2 {
-		// One SOA => the server answered with the full zone (already complete:
-		// parse it directly). Zero => not a usable IXFR answer at all.
-		if soas == 1 && len(records) > 1 {
-			domains, err := rpzOwners(records, zone)
+			names, err := ownerNames(rr, zone)
 			if err != nil {
 				return nil, false, err
 			}
+			if len(names) == 0 {
+				continue
+			}
+			delta = append(delta, deltaRec{names, section})
+			for _, n := range names {
+				all[n] = struct{}{}
+				if len(all) > rpzMaxZoneDomains {
+					return nil, false, fmt.Errorf("transfer exceeds %d domains", rpzMaxZoneDomains)
+				}
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+	}
+	if soas < 2 {
+		// One SOA => the server answered with the full zone (already complete).
+		// Zero => not a usable IXFR answer at all.
+		if soas == 1 && len(delta) > 0 {
+			domains := make([]string, 0, len(all))
+			for n := range all {
+				domains = append(domains, n)
+			}
+			sort.Strings(domains)
 			return domains, true, nil
 		}
 		return nil, false, nil
 	}
 	// A genuine delta starts with SOA(oldSerial) and its second SOA carries the new
 	// serial. Two SOAs with the SAME serial mean the server answered with the full
-	// zone (how miekg/dns terminates a full-transfer IXFR): parse it directly.
-	firstSOA, lastSOA := soaSerial(records)
+	// zone (how miekg/dns terminates a full-transfer IXFR): every seen domain stands.
 	if firstSOA == lastSOA {
-		domains, err := rpzOwners(records, zone)
-		if err != nil {
-			return nil, false, err
+		domains := make([]string, 0, len(all))
+		for n := range all {
+			domains = append(domains, n)
 		}
+		sort.Strings(domains)
 		return domains, true, nil
 	}
 	// Delta layout: SOA(oldSerial), deletions..., SOA(newSerial), additions...
-	section := 0
-	for _, rr := range records {
-		if rr.Header().Rrtype == dns.TypeSOA {
-			section++
-			continue
-		}
-		names, err := ownerNames(rr, zone)
-		if err != nil {
-			return nil, false, err
-		}
-		if section == 1 {
-			for _, n := range names {
+	for _, rec := range delta {
+		if rec.section == 1 {
+			for _, n := range rec.names {
 				delete(base, n)
 			}
-		} else if section >= 2 {
-			for _, n := range names {
+		} else if rec.section >= 2 {
+			for _, n := range rec.names {
 				base[n] = struct{}{}
 			}
 		}
@@ -314,20 +359,6 @@ func (s *Service) ixfrDomains(ctx context.Context, up rpzUpstream, zone string, 
 	}
 	sort.Strings(out)
 	return out, true, nil
-}
-
-// soaSerial returns the serial of the first and last SOA in a transfer stream.
-func soaSerial(records []dns.RR) (uint32, uint32) {
-	var first, last uint32
-	for _, rr := range records {
-		if soa, ok := rr.(*dns.SOA); ok {
-			if first == 0 {
-				first = soa.Serial
-			}
-			last = soa.Serial
-		}
-	}
-	return first, last
 }
 
 // ownerNames returns the normalized blocked-domain name of a single delta record,
