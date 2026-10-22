@@ -92,6 +92,15 @@ func (s *Service) rpzSyncUpstream(ctx context.Context, up rpzUpstream, force boo
 	if serial == up.Serial && serial != 0 {
 		return nil // upstream not newer
 	}
+	// Never persist a zero-domain transfer for a provably non-empty zone: a
+	// truncated/garbage response must not wipe the known-good blocklist.
+	// Only an empty transfer that carries the zone's own apex SOA counts as a
+	// genuine empty zone (normally impossible for this RPZ).
+	if len(domains) == 0 && !s.rpzApexConfirmed(ctx, up) {
+		err := fmt.Errorf("ignoring empty transfer for non-empty zone (serial %d)", serial)
+		s.recordRPZError(ctx, up.ID, err)
+		return err
+	}
 	content := strings.Join(domains, "\n")
 	if len(domains) > 0 {
 		content += "\n"
@@ -133,6 +142,27 @@ func (u rpzUpstream) sign(m *dns.Msg) {
 	if u.TSIGKey != "" {
 		m.SetTsig(dns.Fqdn(u.TSIGKey), dns.HmacSHA256, 300, time.Now().Unix())
 	}
+}
+
+// rpzApexConfirmed reports whether the upstream still serves the zone's apex SOA.
+// A zone that answers its own SOA cannot legitimately transfer zero records, so a
+// zero-domain result without apex confirmation means a truncated/garbage response.
+func (s *Service) rpzApexConfirmed(ctx context.Context, up rpzUpstream) bool {
+	zone := dns.Fqdn(up.Zone)
+	m := new(dns.Msg)
+	m.SetQuestion(zone, dns.TypeSOA)
+	up.sign(m)
+	c := &dns.Client{Timeout: 10 * time.Second, TsigSecret: up.tsigSecret()}
+	r, _, err := c.ExchangeContext(ctx, m, up.Upstream)
+	if err != nil || r == nil || r.Rcode != dns.RcodeSuccess {
+		return false
+	}
+	for _, a := range r.Answer {
+		if soa, ok := a.(*dns.SOA); ok && strings.EqualFold(soa.Hdr.Name, zone) {
+			return true
+		}
+	}
+	return false
 }
 
 // transferRPZ does the whole pull: SOA serial, then AXFR (no local serial) or IXFR.

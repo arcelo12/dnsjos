@@ -346,6 +346,37 @@ func TestRPZSlaveErrorRecorded(t *testing.T) {
 	}
 }
 
+// A failed transfer must never wipe the known-good content: the source keeps its
+// old domains, the serial does not advance, and the error is recorded.
+func TestRPZSlaveFailedTransferPreservesContent(t *testing.T) {
+	s, pool := newProfileSvc(t)
+	// Point the upstream at a dead port so the transfer fails.
+	srcID := addSource(t, pool, "preserve", api.SourceRPZDomains, "keep.example\n", "")
+	var upID string
+	if err := pool.QueryRow(context.Background(), `INSERT INTO rpz_upstreams
+		(name, upstream, zone, interval_s, source_id) VALUES ('preserve', '127.0.0.1:1', $1, 900, $2) RETURNING id::text`,
+		rpzZone, srcID).Scan(&upID); err != nil {
+		t.Fatal(err)
+	}
+	up := loadUpstream(t, s, upID)
+	if err := s.rpzSyncUpstream(context.Background(), up, true); err == nil {
+		t.Fatal("sync against a dead master succeeded")
+	}
+	var content string
+	var serial uint32
+	if err := pool.QueryRow(context.Background(),
+		"SELECT s.content, u.serial FROM blocklist_sources s JOIN rpz_upstreams u ON u.source_id = s.id WHERE s.id = $1",
+		srcID).Scan(&content, &serial); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "keep.example") {
+		t.Fatalf("failed sync wiped content = %q", content)
+	}
+	if serial != 0 {
+		t.Fatalf("failed sync advanced serial to %d", serial)
+	}
+}
+
 // With TSIG configured, a correctly signed transfer succeeds and a wrong secret fails.
 func TestRPZSlaveTSIG(t *testing.T) {
 	s, _ := newProfileSvc(t)
