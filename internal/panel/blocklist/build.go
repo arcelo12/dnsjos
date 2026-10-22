@@ -293,7 +293,11 @@ func (s *Service) execute(ctx context.Context, id int64, profileID string, force
 		if err := os.WriteFile(s.fingerprintPath(profileID), []byte(res.fingerprint), 0o644); err != nil {
 			return b, err
 		}
-		s.prune(wctx)
+		// Prune runs on its own clock: it deletes stale multi-hundred-MB artifacts
+		// and must not inherit wctx's 30s row-close deadline.
+		pctx, pcancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		s.prune(pctx)
+		pcancel()
 	}
 	debug.FreeOSMemory() // the CDB writer's index is transient; hand it back to the OS
 	return b, buildErr
