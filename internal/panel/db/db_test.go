@@ -66,7 +66,7 @@ func TestMigrate(t *testing.T) {
 // TestMigrateDefaultGroupID covers installs that carry the blocklist_groups feature (from
 // an earlier branch): it adds a NOT NULL group_id (no default) to blocklist_sources and
 // blocklist_builds, so every insert that does not name a group fails with SQLSTATE 23502
-// (scheduled builds and RPZ master creation 500'd in production). 0016_default_group_id
+// (scheduled builds and RPZ master creation 500'd in production). 0019_default_group_id
 // must pin the default group as the column default.
 func TestMigrateDefaultGroupID(t *testing.T) {
 	url := os.Getenv("DNSJOS_TEST_DATABASE_URL")
@@ -114,7 +114,7 @@ func TestMigrateDefaultGroupID(t *testing.T) {
 		`ALTER TABLE blocklist_sources ALTER COLUMN group_id SET NOT NULL`,
 		`ALTER TABLE blocklist_builds ADD COLUMN group_id uuid REFERENCES blocklist_groups(id) ON DELETE CASCADE`,
 		`ALTER TABLE blocklist_builds ALTER COLUMN group_id SET NOT NULL`,
-		`DELETE FROM schema_migrations WHERE version = '0016_default_group_id'`,
+		`DELETE FROM schema_migrations WHERE version = '0019_default_group_id'`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Fatalf("%v: %v", q, err)
@@ -124,8 +124,8 @@ func TestMigrateDefaultGroupID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(applied, "0016_default_group_id") {
-		t.Fatalf("applied %v, want 0016_default_group_id", applied)
+	if !slices.Contains(applied, "0019_default_group_id") {
+		t.Fatalf("applied %v, want 0019_default_group_id", applied)
 	}
 
 	var gid string
