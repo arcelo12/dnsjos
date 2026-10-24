@@ -80,7 +80,7 @@ func parseBlockpageIPs(s string, wantV4 bool) ([]netip.Addr, error) {
 	var out []netip.Addr
 	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
 		a, err := netip.ParseAddr(f)
-		if err != nil {
+		if err != nil || a.Zone() != "" {
 			return nil, fmt.Errorf("%q is not an IP address", f)
 		}
 		if wantV4 && !a.Is4() {

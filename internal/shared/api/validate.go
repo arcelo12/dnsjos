@@ -127,13 +127,13 @@ func (s ConfigSpec) Validate() error {
 
 	b := s.Blocking
 	for _, f := range strings.FieldsFunc(b.BlockpageIPv4, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if a, err := netip.ParseAddr(f); b.Enabled && (err != nil || !a.Is4()) {
+		if a, err := netip.ParseAddr(f); b.Enabled && (err != nil || a.Zone() != "" || !a.Is4()) {
 			bad("blocking.blockpage_ipv4", "%q is not an IPv4 address", f)
 			break
 		}
 	}
 	for _, f := range strings.FieldsFunc(b.BlockpageIPv6, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if a, err := netip.ParseAddr(f); b.Enabled && (err != nil || !a.Is6() || a.Is4In6()) {
+		if a, err := netip.ParseAddr(f); b.Enabled && (err != nil || a.Zone() != "" || !a.Is6() || a.Is4In6()) {
 			bad("blocking.blockpage_ipv6", "%q is not an IPv6 address", f)
 			break
 		}
