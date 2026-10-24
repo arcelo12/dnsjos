@@ -335,7 +335,10 @@ Rendering rules (must be byte-for-byte deterministic for the same input):
      `SetTagAction('dnsjos','blocked')`.
    * If `log_blocked`: `DnstapLogAction(hostname, newFrameStreamTcpLogger(dnstap_addr))`
      on the tag, **before** the answer actions.
-   * Answers on the tag: A → `SpoofAction(blockpage_ipv4)`, AAAA → `SpoofAction(blockpage_ipv6)`,
+   * Answers on the tag: A → `SpoofAction(blockpage_ipv4)`, AAAA → `SpoofAction(blockpage_ipv6)`
+     (both fields accept a comma-separated list; every entry is answered so clients
+     get a fallback when one blockpage server is down — the first entry stays the
+     primary for the response-IP rewrite and the agent self-check),
      TXT → `SpoofRawAction` (txt), SOA/NS → raw SOA/NS, **every other qtype → NODATA**
      (`RCodeAction(DNSRCode.NOERROR)`), matching the production behaviour that blocks
      HTTPS/SVCB lookups.
