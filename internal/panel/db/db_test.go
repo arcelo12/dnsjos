@@ -57,6 +57,23 @@ func TestMigrate(t *testing.T) {
 	if err != nil || len(again) != 0 {
 		t.Fatalf("second run: %v %v", again, err)
 	}
+	// Production has previously run these migrations under their old IDs before they were
+	// renumbered during the rebase. The runner must recognize those IDs as aliases, or it
+	// attempts to add already-existing columns/tables on upgrade.
+	for current, legacy := range map[string]string{
+		"0014_speedcheck_report": "0013_speedcheck_report",
+		"0017_rpz_upstreams": "0014_rpz_upstreams",
+		"0018_source_profiles": "0015_source_profiles",
+		"0019_default_group_id": "0016_default_group_id",
+	} {
+		if _, err := pool.Exec(ctx, "UPDATE schema_migrations SET version = $1 WHERE version = $2", legacy, current); err != nil {
+			t.Fatal(err)
+		}
+	}
+	aliased, err := Migrate(ctx, pool)
+	if err != nil || len(aliased) != 0 {
+		t.Fatalf("legacy migration IDs: applied %v, err %v; want no reapplication", aliased, err)
+	}
 	var n int
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM config_profiles WHERE name='default'").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("seed: %d %v", n, err)
