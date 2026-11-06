@@ -38,6 +38,7 @@ import {
   useDeleteSource,
   useUpdateSource,
 } from '@/lib/api/client'
+import { canStartBlocklistBuild } from '@/lib/blocklistScope'
 import type { BlocklistBuild, BlocklistLookup, BlocklistProfile, BlocklistSource, BlocklistSourceCreate, BlocklistSourceKind, BlocklistSourcePatch } from '@/lib/api/types'
 import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, shortSha } from '@/lib/format'
 import { cn, looksLikeIP } from '@/lib/utils'
@@ -102,6 +103,7 @@ export default function BlocklistPage() {
   const profile = scope !== undefined && scope !== '' ? profiles.data?.items.find((p) => p.id === scope) : undefined
   const { builds, current, running } = useBuildState(scope)
   const buildNow = useBuildNow()
+  const canBuild = canStartBlocklistBuild(scope)
   const busy = running || buildNow.isPending
   const [changesOf, setChangesOf] = useState<BlocklistBuild | null>(null)
   const runBuild = (force: boolean) =>
@@ -122,20 +124,28 @@ export default function BlocklistPage() {
     <>
       <PageHeader
         title="Blocklist"
-        description="TrustPositif and custom lists, built once per profile into a CDB file that the profile's nodes download."
+        description={canBuild
+          ? "TrustPositif and custom lists, built once per profile into a CDB file that the profile's nodes download."
+          : 'Select a profile or Global scope to build. All profiles is a combined view for browsing and does not correspond to a single build.'}
         actions={
           <RequireAdmin>
             <div className="flex flex-wrap gap-2">
               <Button
                 variant="outline"
-                disabled={busy}
-                title="Ignore cached copies: download every source again and rebuild (useful to measure download speed)"
+                disabled={busy || !canBuild}
+                title={canBuild
+                  ? 'Ignore cached copies: download every source again and rebuild (useful to measure download speed)'
+                  : 'Choose a profile or Global scope before starting a build'}
                 onClick={() => runBuild(true)}
               >
                 <LuRefreshCw className={busy ? 'animate-spin' : undefined} />
                 Force re-download
               </Button>
-              <Button disabled={busy} onClick={() => runBuild(false)}>
+              <Button
+                disabled={busy || !canBuild}
+                title={canBuild ? undefined : 'Choose a profile or Global scope before starting a build'}
+                onClick={() => runBuild(false)}
+              >
                 <LuHammer className={busy ? 'animate-pulse' : undefined} />
                 {busy ? 'Building…' : `Build now · ${scopeLabel}`}
               </Button>
