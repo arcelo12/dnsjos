@@ -128,29 +128,43 @@ export default function BlocklistPage() {
           ? "TrustPositif and custom lists, built once per profile into a CDB file that the profile's nodes download."
           : 'Select a profile or Global scope to build. All profiles is a combined view for browsing and does not correspond to a single build.'}
         actions={
-          <RequireAdmin>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                disabled={busy || !canBuild}
-                title={canBuild
-                  ? 'Ignore cached copies: download every source again and rebuild (useful to measure download speed)'
-                  : 'Choose a profile or Global scope before starting a build'}
-                onClick={() => runBuild(true)}
-              >
-                <LuRefreshCw className={busy ? 'animate-spin' : undefined} />
-                Force re-download
-              </Button>
-              <Button
-                disabled={busy || !canBuild}
-                title={canBuild ? undefined : 'Choose a profile or Global scope before starting a build'}
-                onClick={() => runBuild(false)}
-              >
-                <LuHammer className={busy ? 'animate-pulse' : undefined} />
-                {busy ? 'Building…' : `Build now · ${scopeLabel}`}
-              </Button>
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="space-y-1">
+              <label htmlFor="build-scope" className="text-xs font-medium text-muted-foreground">
+                Scope
+              </label>
+              <ScopeSelect
+                selected={selected}
+                onSelect={setSelected}
+                profiles={profiles.data?.items}
+                id="build-scope"
+                className="w-48"
+              />
             </div>
-          </RequireAdmin>
+            <RequireAdmin>
+              <div className="flex flex-wrap items-end gap-2">
+                <Button
+                  variant="outline"
+                  disabled={busy || !canBuild}
+                  title={canBuild
+                    ? 'Ignore cached copies: download every source again and rebuild (useful to measure download speed)'
+                    : 'Choose a profile or Global scope before starting a build'}
+                  onClick={() => runBuild(true)}
+                >
+                  <LuRefreshCw className={busy ? 'animate-spin' : undefined} />
+                  Force re-download
+                </Button>
+                <Button
+                  disabled={busy || !canBuild}
+                  title={canBuild ? undefined : 'Choose a profile or Global scope before starting a build'}
+                  onClick={() => runBuild(false)}
+                >
+                  <LuHammer className={busy ? 'animate-pulse' : undefined} />
+                  {busy ? 'Building…' : `Build now · ${scopeLabel}`}
+                </Button>
+              </div>
+            </RequireAdmin>
+          </div>
         }
       />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
@@ -175,7 +189,6 @@ export default function BlocklistPage() {
               Newest first. The newest successful build is the one nodes on this scope download.
             </CardDescription>
           </div>
-          <ScopeSelect selected={selected} onSelect={setSelected} profiles={profiles.data?.items} id="builds-scope" />
         </CardHeader>
         <CardContent>
           <DataTable
