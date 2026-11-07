@@ -232,11 +232,12 @@ func (s *Service) patchRPZUpstream(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if profilesSet {
-			// Scope lives on the paired source; a scope change forces a rebuild from a clean
-			// slate (the stale content belonged to the old scope) and rewrites the join rows.
+			// Scope lives on the paired source; a scope change rewrites the join rows. The
+			// transferred content is the zone itself, independent of scope, so it is kept:
+			// clearing it would leave the source empty until the master bumps its serial.
 			var srcID string
 			if err := tx.QueryRow(r.Context(), `UPDATE blocklist_sources SET
-				profile_id = nullif($2, '')::uuid, content = '', etag = '', last_modified = '', updated_at = now()
+				profile_id = nullif($2, '')::uuid, etag = '', last_modified = '', updated_at = now()
 				WHERE id = (SELECT source_id FROM rpz_upstreams WHERE id = $1) RETURNING id`,
 				id, firstOrEmpty(profiles)).Scan(&srcID); err != nil {
 				return err

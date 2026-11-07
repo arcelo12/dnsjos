@@ -466,6 +466,119 @@ func TestRPZSlaveErrorRecorded(t *testing.T) {
 	if lastErr == "" {
 		t.Fatal("last_error was not recorded")
 	}
+	// The failed attempt counts for the interval gate: the scheduled job must not
+	// re-dial the dead master on the next tick.
+	if last, err := lastRPZSync(context.Background(), pool, upID); err != nil || last == nil {
+		t.Fatalf("failed attempt did not stamp last_sync_at: %v, %v", last, err)
+	}
+}
+
+// A transfer yielding zero domains must not replace a zone that last synced non-empty.
+func TestRPZSlaveRefusesEmptyTransferOverKnownZone(t *testing.T) {
+	s, pool := newProfileSvc(t)
+	master := startFakeRPZ(t)
+	master.set(1, "keep.example")
+	srcID, upID := insertUpstream(t, s, master, false)
+	if err := s.rpzSyncUpstream(context.Background(), loadUpstream(t, s, upID), true); err != nil {
+		t.Fatal(err)
+	}
+	master.set(2)                                                            // the zone answers its SOA but carries no blocking records
+	exec(t, pool, `UPDATE rpz_upstreams SET serial = 0 WHERE id = $1`, upID) // force the AXFR path
+	if err := s.rpzSyncUpstream(context.Background(), loadUpstream(t, s, upID), true); err == nil {
+		t.Fatal("empty transfer over a known zone succeeded")
+	}
+	var content string
+	if err := pool.QueryRow(context.Background(), "SELECT content FROM blocklist_sources WHERE id = $1", srcID).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	if content != "keep.example\n" {
+		t.Fatalf("empty transfer wiped content: %q", content)
+	}
+}
+
+// A sync that read an older serial than the stored one (another sync committed while it
+// was transferring) must not overwrite the newer content and serial.
+func TestRPZSlaveStaleSyncDoesNotOverwrite(t *testing.T) {
+	s, pool := newProfileSvc(t)
+	master := startFakeRPZ(t)
+	master.set(1, "one.example")
+	srcID, upID := insertUpstream(t, s, master, false)
+	stale := loadUpstream(t, s, upID) // serial 0, as a concurrent sync would have read it
+	master.set(2, "two.example")
+	if err := s.rpzSyncUpstream(context.Background(), loadUpstream(t, s, upID), true); err != nil {
+		t.Fatal(err)
+	}
+	master.set(3, "three.example")
+	if err := s.rpzSyncUpstream(context.Background(), stale, true); err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	var serial uint32
+	if err := pool.QueryRow(context.Background(), `SELECT s.content, u.serial FROM blocklist_sources s
+		JOIN rpz_upstreams u ON u.source_id = s.id WHERE s.id = $1`, srcID).Scan(&content, &serial); err != nil {
+		t.Fatal(err)
+	}
+	if serial != 2 || content != "two.example\n" {
+		t.Fatalf("stale sync overwrote: serial=%d content=%q, want 2 / two.example", serial, content)
+	}
+}
+
+// Editing an RPZ slave source through the generic source PATCH (the dialog always sends
+// content:"" for non-manual kinds) must not wipe the transferred zone.
+func TestPatchSourceKeepsRPZContent(t *testing.T) {
+	_, pool, call := newHandlerSvc(t)
+	srcID := addSource(t, pool, "komdigi", api.SourceRPZDomains, "zone.example\n", "")
+	call("PATCH", "/api/v1/blocklist/sources/"+srcID, `{"name":"renamed","content":"","url":""}`, 200, nil)
+	var name, content string
+	if err := pool.QueryRow(context.Background(), "SELECT name, content FROM blocklist_sources WHERE id = $1", srcID).Scan(&name, &content); err != nil {
+		t.Fatal(err)
+	}
+	if name != "renamed" || content != "zone.example\n" {
+		t.Fatalf("after source PATCH: name=%q content=%q", name, content)
+	}
+}
+
+func TestWithDefaultPort(t *testing.T) {
+	for in, want := range map[string]string{
+		"10.0.0.1":           "10.0.0.1:53",
+		"10.0.0.1:5353":      "10.0.0.1:5353",
+		"rpz.example.net":    "rpz.example.net:53",
+		"2001:db8::1":        "[2001:db8::1]:53",
+		"[2001:db8::1]":      "[2001:db8::1]:53",
+		"[2001:db8::1]:5353": "[2001:db8::1]:5353",
+	} {
+		if got := withDefaultPort(in); got != want {
+			t.Errorf("withDefaultPort(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// RPZ policy: passthru CNAMEs are allow rules and rpz-ip/nsdname/nsip/client-ip owners
+// are triggers; neither is a domain to block. Other actions (NXDOMAIN, drop) are.
+func TestOwnerNamesRPZPolicy(t *testing.T) {
+	cname := func(owner, target string) dns.RR {
+		return &dns.CNAME{Hdr: dns.RR_Header{Name: owner + "." + rpzZone, Rrtype: dns.TypeCNAME, Class: dns.ClassINET}, Target: target}
+	}
+	for _, c := range []struct {
+		rr   dns.RR
+		want string
+	}{
+		{cname("bad.example", "."), "bad.example"},
+		{cname("drop.example", "rpz-drop."), "drop.example"},
+		{cname("ok.example", "rpz-passthru."), ""},
+		{cname("32.1.0.0.10.rpz-ip", "."), ""},
+		{cname("ns.bad.example.rpz-nsdname", "."), ""},
+		{cname("32.1.2.0.192.rpz-nsip", "."), ""},
+		{cname("32.5.0.0.10.rpz-client-ip", "rpz-passthru."), ""},
+	} {
+		names, err := ownerNames(c.rr, rpzZone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(names, ","); got != c.want {
+			t.Errorf("%s -> %q, want %q", c.rr.Header().Name, got, c.want)
+		}
+	}
 }
 
 // A failed transfer must never wipe the known-good content: the source keeps its
@@ -629,7 +742,8 @@ func TestRPZUpstreamPatchTSIGPair(t *testing.T) {
 
 // An RPZ master can feed several profiles at once: create with profile_ids writes the join
 // rows on the paired source, the listing reports the whole set, and a patch replaces it
-// (which also clears the transferred content so the next sync rebuilds from scratch).
+// while keeping the transferred zone (it does not depend on scope, and the serial is not
+// reset, so a cleared content would stay empty until the master bumps its serial).
 func TestRPZUpstreamProfileSetHTTP(t *testing.T) {
 	_, pool, call := newHandlerSvc(t)
 	a, b, c := newProfile(t, pool, "A"), newProfile(t, pool, "B"), newProfile(t, pool, "C")
@@ -648,8 +762,8 @@ func TestRPZUpstreamProfileSetHTTP(t *testing.T) {
 		t.Fatalf("paired source join rows = %d, want 2", rows)
 	}
 
-	// A patch moves the set to {B,C}: the stale transfer is dropped so the next sync is full.
-	exec(t, pool, `UPDATE blocklist_sources SET content = 'stale.example' WHERE id = $1`, created.SourceID)
+	// A patch moves the set to {B,C}: the transferred zone stays.
+	exec(t, pool, `UPDATE blocklist_sources SET content = 'zone.example' WHERE id = $1`, created.SourceID)
 	var patched api.RPZUpstream
 	call("PATCH", "/api/v1/rpz/upstreams/"+created.ID, `{"profile_ids":["`+b+`","`+c+`"]}`, 200, &patched)
 	if len(patched.ProfileIDs) != 2 || !contains(patched.ProfileIDs, b) || !contains(patched.ProfileIDs, c) || contains(patched.ProfileIDs, a) {
@@ -661,8 +775,8 @@ func TestRPZUpstreamProfileSetHTTP(t *testing.T) {
 		Scan(&content, &legacy); err != nil {
 		t.Fatal(err)
 	}
-	if content != "" {
-		t.Fatalf("profile move kept stale content %q", content)
+	if content != "zone.example" {
+		t.Fatalf("profile move changed the transferred content to %q", content)
 	}
 	if legacy != b {
 		t.Fatalf("legacy profile_id = %q, want the first profile %q", legacy, b)

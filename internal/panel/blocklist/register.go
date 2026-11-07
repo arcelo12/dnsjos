@@ -311,6 +311,11 @@ func (s *Service) patchSource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// An RPZ slave source's content is owned by the zone transfer: the source dialog submits
+	// content:"" for every non-manual kind, which would wipe the transferred zone.
+	if isRPZDomainsKind(kind) {
+		req.Content = nil
+	}
 	// A profile change is a request to set the exact profile set; null leaves it unchanged.
 	// The legacy single ProfileID folds into it when ProfileIDs is absent.
 	var profiles []string

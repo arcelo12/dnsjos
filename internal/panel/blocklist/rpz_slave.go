@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -55,7 +56,17 @@ func scanRPZUpstream(row pgx.Row) (rpzUpstream, error) {
 	if u.ProfileIDs == nil {
 		u.ProfileIDs = []string{}
 	}
+	u.Upstream = withDefaultPort(u.Upstream)
 	return u, err
+}
+
+// withDefaultPort appends DNS port 53 to a bare host or IP ("10.0.0.1", "2001:db8::1",
+// "[2001:db8::1]"); miekg/dns dials need host:port. host:port passes through unchanged.
+func withDefaultPort(hostport string) string {
+	if _, _, err := net.SplitHostPort(hostport); err == nil || hostport == "" {
+		return hostport
+	}
+	return net.JoinHostPort(strings.Trim(hostport, "[]"), "53")
 }
 
 // rpzSyncAll is the scheduled job: sync every upstream whose source is still enabled and
@@ -110,12 +121,12 @@ func (s *Service) rpzSyncUpstream(ctx context.Context, up rpzUpstream, force boo
 		s.recordRPZError(ctx, up.ID, err)
 		return err
 	}
-	// Never persist a zero-domain transfer for a provably non-empty zone: a
-	// truncated/garbage response must not wipe the known-good blocklist.
-	// Only an empty transfer that carries the zone's own apex SOA counts as a
-	// genuine empty zone (normally impossible for this RPZ).
-	if len(domains) == 0 && !s.rpzApexConfirmed(ctx, up) {
-		err := fmt.Errorf("ignoring empty transfer for non-empty zone (serial %d)", serial)
+	// Never persist a zero-domain transfer over a zone that last synced non-empty: a
+	// truncated/garbage response (or one with no blocking records) must not wipe the
+	// known-good blocklist. ponytail: a master that truly empties a non-empty zone is
+	// refused too; clear it by deleting/recreating the upstream if that ever happens.
+	if len(domains) == 0 && up.TotalDomains > 0 {
+		err := fmt.Errorf("ignoring empty transfer at serial %d (last sync had %d domains)", serial, up.TotalDomains)
 		s.recordRPZError(ctx, up.ID, err)
 		return err
 	}
@@ -123,14 +134,31 @@ func (s *Service) rpzSyncUpstream(ctx context.Context, up rpzUpstream, force boo
 	if len(domains) > 0 {
 		content += "\n"
 	}
-	if _, err := s.d.Pool.Exec(ctx, `UPDATE blocklist_sources SET content = $2, updated_at = now() WHERE id = $1`,
-		up.SourceID, content); err != nil {
+	// Content and serial move together (an IXFR applies onto the content at that serial),
+	// and only if no other sync wrote since this one read up.Serial: a concurrent manual
+	// and scheduled sync both transfer, but only the first to commit is kept.
+	stale := false
+	err = pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE rpz_upstreams SET serial = $2, total_domains = $3,
+			last_sync_at = now(), last_error = '' WHERE id = $1 AND serial = $4`,
+			up.ID, serial, len(domains), up.Serial)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			stale = true
+			return nil
+		}
+		_, err = tx.Exec(ctx, `UPDATE blocklist_sources SET content = $2, updated_at = now() WHERE id = $1`,
+			up.SourceID, content)
+		return err
+	})
+	if err != nil {
 		s.recordRPZError(ctx, up.ID, err)
 		return err
 	}
-	if _, err := s.d.Pool.Exec(ctx, `UPDATE rpz_upstreams SET serial = $2, total_domains = $3,
-		last_sync_at = now(), last_error = '' WHERE id = $1`, up.ID, serial, len(domains)); err != nil {
-		return err
+	if stale {
+		return nil // another sync (or an upstream edit) moved the serial first
 	}
 	s.markDirty(ctx, up.SourceID)
 	_ = audit.Log(ctx, s.d.Pool, nil, "blocklist.rpz.sync", "rpz_upstream", up.ID,
@@ -145,7 +173,9 @@ func lastRPZSync(ctx context.Context, q db.Querier, id string) (*time.Time, erro
 }
 
 func (s *Service) recordRPZError(ctx context.Context, id string, err error) {
-	_, _ = s.d.Pool.Exec(ctx, "UPDATE rpz_upstreams SET last_error = $2 WHERE id = $1", id, err.Error())
+	// last_sync_at is the last attempt: stamping failures too keeps a dead master on the
+	// upstream's interval instead of re-dialing it every scheduler tick.
+	_, _ = s.d.Pool.Exec(ctx, "UPDATE rpz_upstreams SET last_error = $2, last_sync_at = now() WHERE id = $1", id, err.Error())
 }
 
 // tsigSecret returns the miekg/dns TSIG map for the upstream, or nil without TSIG.
@@ -160,27 +190,6 @@ func (u rpzUpstream) sign(m *dns.Msg) {
 	if u.TSIGKey != "" {
 		m.SetTsig(dns.Fqdn(u.TSIGKey), dns.HmacSHA256, 300, time.Now().Unix())
 	}
-}
-
-// rpzApexConfirmed reports whether the upstream still serves the zone's apex SOA.
-// A zone that answers its own SOA cannot legitimately transfer zero records, so a
-// zero-domain result without apex confirmation means a truncated/garbage response.
-func (s *Service) rpzApexConfirmed(ctx context.Context, up rpzUpstream) bool {
-	zone := dns.Fqdn(up.Zone)
-	m := new(dns.Msg)
-	m.SetQuestion(zone, dns.TypeSOA)
-	up.sign(m)
-	c := &dns.Client{Timeout: 10 * time.Second, TsigSecret: up.tsigSecret()}
-	r, _, err := c.ExchangeContext(ctx, m, up.Upstream)
-	if err != nil || r == nil || r.Rcode != dns.RcodeSuccess {
-		return false
-	}
-	for _, a := range r.Answer {
-		if soa, ok := a.(*dns.SOA); ok && strings.EqualFold(soa.Hdr.Name, zone) {
-			return true
-		}
-	}
-	return false
 }
 
 // transferRPZ pulls the zone at the given upstream serial: AXFR when there is no local
@@ -374,11 +383,22 @@ func ownerNames(rr dns.RR, zone string) ([]string, error) {
 		return nil, nil
 	}
 	switch rr.Header().Rrtype {
-	case dns.TypeCNAME, dns.TypeA, dns.TypeAAAA:
+	case dns.TypeCNAME:
+		if strings.EqualFold(rr.(*dns.CNAME).Target, "rpz-passthru.") {
+			// ponytail: passthru is an allow rule; it is skipped, not applied as an
+			// allowlist entry, so it cannot override a wildcard block in the same zone.
+			return nil, nil
+		}
+	case dns.TypeA, dns.TypeAAAA:
 	default:
 		return nil, nil
 	}
 	domain := strings.TrimSuffix(strings.TrimSuffix(owner, zone), ".")
+	labels := strings.Split(domain, ".")
+	switch labels[len(labels)-1] {
+	case "rpz-ip", "rpz-nsdname", "rpz-nsip", "rpz-client-ip":
+		return nil, nil // response/NS/client triggers, not a QNAME to block
+	}
 	if name, ok := normalizeDomain(domain); ok {
 		return []string{name}, nil
 	}
@@ -403,35 +423,4 @@ func (s *Service) rpzSOA(ctx context.Context, up rpzUpstream, zone string) (uint
 		}
 	}
 	return 0, errors.New("no zone SOA in response")
-}
-
-// rpzOwners extracts the blocked domains from a transfer: every owner of a CNAME/A/AAAA
-// record inside the zone, minus the zone apex, normalized by the same rules the build
-// uses. Duplicates are collapsed.
-func rpzOwners(records []dns.RR, zone string) ([]string, error) {
-	seen := make(map[string]struct{}, len(records))
-	for _, rr := range records {
-		owner := strings.ToLower(dns.Fqdn(rr.Header().Name))
-		if !dns.IsSubDomain(zone, owner) {
-			return nil, fmt.Errorf("owner outside RPZ zone: %s", owner)
-		}
-		if owner == zone {
-			continue
-		}
-		switch rr.Header().Rrtype {
-		case dns.TypeCNAME, dns.TypeA, dns.TypeAAAA:
-		default:
-			continue
-		}
-		domain := strings.TrimSuffix(strings.TrimSuffix(owner, zone), ".")
-		if name, ok := normalizeDomain(domain); ok {
-			seen[name] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for d := range seen {
-		out = append(out, d)
-	}
-	sort.Strings(out)
-	return out, nil
 }

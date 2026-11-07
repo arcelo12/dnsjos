@@ -46,6 +46,7 @@ func TestValidateRejects(t *testing.T) {
 		"blockpage v4":    func(s *ConfigSpec) { s.Blocking.BlockpageIPv4 = "::1" },
 		"blockpage v6":    func(s *ConfigSpec) { s.Blocking.BlockpageIPv6 = "1.2.3.4" },
 		"blockpage multi": func(s *ConfigSpec) { s.Blocking.BlockpageIPv4 = "192.0.2.10, nope" },
+		"blockpage empty": func(s *ConfigSpec) { s.Blocking.BlockpageIPv6 = "" },
 		"blockpage too many": func(s *ConfigSpec) {
 			s.Blocking.BlockpageIPv4 = "192.0.2.1, 192.0.2.2, 192.0.2.3, 192.0.2.4, 192.0.2.5, 192.0.2.6, 192.0.2.7, 192.0.2.8, 192.0.2.9"
 		},
