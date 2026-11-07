@@ -93,13 +93,22 @@ func (s *Service) rpzSyncUpstream(ctx context.Context, up rpzUpstream, force boo
 			return nil
 		}
 	}
-	serial, domains, err := s.transferRPZ(ctx, up)
+	zone := dns.Fqdn(up.Zone)
+	serial, err := s.rpzSOA(ctx, up, zone)
 	if err != nil {
 		s.recordRPZError(ctx, up.ID, err)
 		return err
 	}
 	if serial == up.Serial && serial != 0 {
-		return nil // upstream not newer
+		// Upstream not newer: check the SOA only, never transfer, and stamp the sync
+		// time so the interval gate holds until the next check is due.
+		_, err := s.d.Pool.Exec(ctx, `UPDATE rpz_upstreams SET last_sync_at = now(), last_error = '' WHERE id = $1`, up.ID)
+		return err
+	}
+	domains, err := s.transferRPZ(ctx, up, zone, serial)
+	if err != nil {
+		s.recordRPZError(ctx, up.ID, err)
+		return err
 	}
 	// Never persist a zero-domain transfer for a provably non-empty zone: a
 	// truncated/garbage response must not wipe the known-good blocklist.
@@ -174,31 +183,23 @@ func (s *Service) rpzApexConfirmed(ctx context.Context, up rpzUpstream) bool {
 	return false
 }
 
-// transferRPZ does the whole pull: SOA serial, then AXFR (no local serial) or IXFR.
-// It returns the upstream serial and the full domain list (already normalized).
+// transferRPZ pulls the zone at the given upstream serial: AXFR when there is no local
+// serial, otherwise IXFR. It returns the full domain list (already normalized).
 //
 // An IXFR answer is a DELTA (deleted records then added records), not a full zone.
 // The delta must be applied on top of the last-known full domain set; treating the
 // delta itself as the whole zone would silently drop every pre-existing domain.
-func (s *Service) transferRPZ(ctx context.Context, up rpzUpstream) (uint32, []string, error) {
-	zone := dns.Fqdn(up.Zone)
-	serial, err := s.rpzSOA(ctx, up, zone)
-	if err != nil {
-		return 0, nil, err
-	}
-	if up.Serial == 0 {
-		return s.axfrDomains(ctx, up, zone, serial)
-	}
-	domains, ok, err := s.ixfrDomains(ctx, up, zone, serial)
-	if err != nil {
-		return 0, nil, err
-	}
-	if !ok {
+func (s *Service) transferRPZ(ctx context.Context, up rpzUpstream, zone string, serial uint32) ([]string, error) {
+	if up.Serial != 0 {
+		domains, ok, err := s.ixfrDomains(ctx, up, zone)
+		if err != nil || ok {
+			return domains, err
+		}
 		// No usable last-known set (or the master refused IXFR): fall back to a
 		// full AXFR so content is always the complete zone, never a bare delta.
-		return s.axfrDomains(ctx, up, zone, serial)
 	}
-	return serial, domains, nil
+	_, domains, err := s.axfrDomains(ctx, up, zone, serial)
+	return domains, err
 }
 
 // axfrDomains pulls the full zone via AXFR and extracts the normalized domain list.
@@ -243,11 +244,20 @@ func (s *Service) axfrDomains(ctx context.Context, up rpzUpstream, zone string, 
 	return serial, domains, nil
 }
 
-// ixfrDomains applies the IXFR delta on top of the last-known full domain set taken
-// from the linked source's content. It returns ok=false when there is no usable
-// base set or the server's answer is not an incremental update; the caller then
-// falls back to AXFR.
-func (s *Service) ixfrDomains(ctx context.Context, up rpzUpstream, zone string, serial uint32) ([]string, bool, error) {
+// ixfrDomains applies the IXFR answer on top of the last-known full domain set taken
+// from the linked source's content. It returns ok=false when there is no usable base
+// set or the answer is a bare SOA (nothing to apply); the caller then falls back to AXFR.
+//
+// RFC 1995 answer layouts, as miekg/dns Transfer.In passes them through (first SOA
+// included):
+//
+//	incremental: SOA(new), [SOA(old_i), deletions..., SOA(new_i), additions...]..., SOA(new)
+//	full zone:   SOA(new), records..., SOA(new)
+//
+// The second record tells them apart: an SOA with a serial other than the first is
+// the start of a difference sequence. Inside the deltas every SOA toggles between
+// deleting and adding, so multi-step answers are applied in order.
+func (s *Service) ixfrDomains(ctx context.Context, up rpzUpstream, zone string) ([]string, bool, error) {
 	var content string
 	if err := s.d.Pool.QueryRow(ctx,
 		"SELECT content FROM blocklist_sources WHERE id = $1", up.SourceID).Scan(&content); err != nil {
@@ -271,30 +281,39 @@ func (s *Service) ixfrDomains(ctx context.Context, up rpzUpstream, zone string, 
 	if err != nil {
 		return nil, false, fmt.Errorf("transfer: %w", err)
 	}
-	// Stream the delta without retaining raw records: track only SOA markers and
-	// the ordered owner names (with a section tag) needed for the delete/add walk.
-	type deltaRec struct {
-		names   []string
-		section int // section of the SOA walk the record belongs to: 1-based
-	}
-	var delta []deltaRec
-	all := make(map[string]struct{}) // every domain seen, for the full-zone fallback
-	var firstSOA, lastSOA uint32
-	section := 0
-	soas := 0
+	const (
+		modeUnknown = iota // only the opening SOA seen so far
+		modeFull           // the server answered with the whole zone
+		modeDelta          // RFC 1995 difference sequences
+	)
+	mode := modeUnknown
+	var newSerial uint32
+	records := 0
+	deleting := false
+	full := make(map[string]struct{}) // modeFull: the zone is rebuilt from scratch
 	for env := range envs {
 		if env.Error != nil {
 			return nil, false, fmt.Errorf("transfer stream: %w", env.Error)
 		}
 		for _, rr := range env.RR {
-			if rr.Header().Rrtype == dns.TypeSOA {
-				section++
-				soas++
-				if soa, ok := rr.(*dns.SOA); ok {
-					if firstSOA == 0 {
-						firstSOA = soa.Serial
-					}
-					lastSOA = soa.Serial
+			records++
+			soa, isSOA := rr.(*dns.SOA)
+			if records == 1 {
+				if !isSOA {
+					return nil, false, errors.New("IXFR answer does not start with SOA")
+				}
+				newSerial = soa.Serial
+				continue
+			}
+			if records == 2 {
+				mode = modeFull
+				if isSOA && soa.Serial != newSerial {
+					mode = modeDelta
+				}
+			}
+			if isSOA {
+				if mode == modeDelta {
+					deleting = !deleting // SOA(old_i) opens deletions, SOA(new_i) additions
 				}
 				continue
 			}
@@ -302,55 +321,37 @@ func (s *Service) ixfrDomains(ctx context.Context, up rpzUpstream, zone string, 
 			if err != nil {
 				return nil, false, err
 			}
-			if len(names) == 0 {
-				continue
+			set := full
+			if mode == modeDelta {
+				set = base
 			}
-			delta = append(delta, deltaRec{names, section})
 			for _, n := range names {
-				all[n] = struct{}{}
-				if len(all) > rpzMaxZoneDomains {
-					return nil, false, fmt.Errorf("transfer exceeds %d domains", rpzMaxZoneDomains)
+				if deleting {
+					// ponytail: per-name delete; a name kept by another record of the
+					// same owner (A+AAAA, *.x and x) is dropped too.
+					delete(set, n)
+				} else {
+					set[n] = struct{}{}
 				}
+			}
+			if len(set) > rpzMaxZoneDomains {
+				return nil, false, fmt.Errorf("transfer exceeds %d domains", rpzMaxZoneDomains)
 			}
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
 	}
-	if soas < 2 {
-		// One SOA => the server answered with the full zone (already complete).
-		// Zero => not a usable IXFR answer at all.
-		if soas == 1 && len(delta) > 0 {
-			domains := make([]string, 0, len(all))
-			for n := range all {
-				domains = append(domains, n)
-			}
-			sort.Strings(domains)
-			return domains, true, nil
-		}
-		return nil, false, nil
-	}
-	// A genuine delta starts with SOA(oldSerial) and its second SOA carries the new
-	// serial. Two SOAs with the SAME serial mean the server answered with the full
-	// zone (how miekg/dns terminates a full-transfer IXFR): every seen domain stands.
-	if firstSOA == lastSOA {
-		domains := make([]string, 0, len(all))
-		for n := range all {
-			domains = append(domains, n)
-		}
-		sort.Strings(domains)
-		return domains, true, nil
-	}
-	// Delta layout: SOA(oldSerial), deletions..., SOA(newSerial), additions...
-	for _, rec := range delta {
-		if rec.section == 1 {
-			for _, n := range rec.names {
-				delete(base, n)
-			}
-		} else if rec.section >= 2 {
-			for _, n := range rec.names {
-				base[n] = struct{}{}
-			}
+	switch mode {
+	case modeUnknown:
+		return nil, false, nil // bare SOA: no usable answer
+	case modeFull:
+		base = full
+	case modeDelta:
+		// A complete answer ends on the closing SOA(new) right after additions,
+		// which leaves deleting toggled on; anything else is a truncated stream.
+		if !deleting {
+			return nil, false, errors.New("IXFR answer truncated mid-delta")
 		}
 	}
 	out := make([]string, 0, len(base))

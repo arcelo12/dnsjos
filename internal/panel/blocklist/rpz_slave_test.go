@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -24,15 +25,18 @@ const (
 	tsigB64  = "c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0MTI=" // 32 bytes, base64
 )
 
-// fakeRPZ is a minimal RPZ master: it answers the zone SOA and serves AXFR (and answers
-// IXFR with a full AXFR, which RFC 1995 permits). TSIG is enforced when tsigKey is set.
+// fakeRPZ is a minimal RPZ master: it answers the zone SOA and serves AXFR. An IXFR from
+// a serial it still remembers gets a real RFC 1995 delta chain; any other IXFR gets a full
+// AXFR, which RFC 1995 permits. TSIG is enforced when tsigKey is set.
 type fakeRPZ struct {
 	mu       sync.Mutex
 	serial   uint32
 	domains  []string // blocked owners, no trailing dot
 	tsigKey  string
 	axfrHit  int
-	ixfrSeen *uint32 // the client serial from the last IXFR request
+	deltaHit int           // IXFRs answered with difference sequences
+	history  []zoneVersion // every set() version, oldest first, for IXFR deltas
+	ixfrSeen *uint32       // the client serial from the last IXFR request
 	tcp      *dns.Server
 	udp      *dns.Server
 	addr     string
@@ -40,7 +44,8 @@ type fakeRPZ struct {
 
 func newFakeRPZ(t *testing.T) *fakeRPZ {
 	t.Helper()
-	m := &fakeRPZ{serial: 1, domains: []string{"a.com", "b.com"}}
+	m := &fakeRPZ{}
+	m.set(1, "a.com", "b.com")
 	// Reserve a free port, then serve UDP (SOA) and TCP (transfer) on it.
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -66,7 +71,16 @@ func newFakeRPZ(t *testing.T) *fakeRPZ {
 func (m *fakeRPZ) set(serial uint32, domains ...string) {
 	m.mu.Lock()
 	m.serial, m.domains = serial, domains
+	if n := len(m.history); n > 0 && m.history[n-1].serial == serial {
+		m.history = m.history[:n-1]
+	}
+	m.history = append(m.history, zoneVersion{serial, domains})
 	m.mu.Unlock()
+}
+
+type zoneVersion struct {
+	serial  uint32
+	domains []string
 }
 
 // tsigSecrets is the server's TSIG keyring; empty until a test enables TSIG (the servers
@@ -102,6 +116,9 @@ func (m *fakeRPZ) handle(w dns.ResponseWriter, req *dns.Msg) {
 				m.mu.Lock()
 				m.ixfrSeen = &soa
 				m.mu.Unlock()
+				if m.serveDelta(w, req, soa) {
+					return
+				}
 			}
 		}
 		m.serveTransfer(w, req)
@@ -170,6 +187,67 @@ func (m *fakeRPZ) serveTransfer(w dns.ResponseWriter, req *dns.Msg) {
 		// Out cannot report over the wire; nothing else to do in a fake.
 		_ = err
 	}
+}
+
+// serveDelta answers an IXFR from client serial `from` with RFC 1995 difference
+// sequences, one per remembered version step:
+// SOA(new), [SOA(v_i), deletions..., SOA(v_i+1), additions...]..., SOA(new).
+// It reports false when `from` is unknown or current, so the caller sends a full zone.
+func (m *fakeRPZ) serveDelta(w dns.ResponseWriter, req *dns.Msg, from uint32) bool {
+	m.mu.Lock()
+	start := -1
+	for i, v := range m.history {
+		if v.serial == from {
+			start = i
+		}
+	}
+	if start < 0 || start == len(m.history)-1 {
+		m.mu.Unlock()
+		return false
+	}
+	m.deltaHit++
+	soaAt := func(serial uint32) dns.RR {
+		soa := m.soaLocked()
+		soa.Serial = serial
+		return soa
+	}
+	rrs := []dns.RR{m.soaLocked()}
+	for i := start; i < len(m.history)-1; i++ {
+		prev, next := m.history[i], m.history[i+1]
+		rrs = append(rrs, soaAt(prev.serial))
+		rrs = append(rrs, cnames(without(prev.domains, next.domains))...)
+		rrs = append(rrs, soaAt(next.serial))
+		rrs = append(rrs, cnames(without(next.domains, prev.domains))...)
+	}
+	rrs = append(rrs, m.soaLocked())
+	m.mu.Unlock()
+	ch := make(chan *dns.Envelope, 1)
+	ch <- &dns.Envelope{RR: rrs}
+	close(ch)
+	_ = (&dns.Transfer{}).Out(w, req, ch)
+	return true
+}
+
+// without returns the names in a that are not in b.
+func without(a, b []string) []string {
+	var out []string
+	for _, n := range a {
+		if !slices.Contains(b, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func cnames(domains []string) []dns.RR {
+	rrs := make([]dns.RR, 0, len(domains))
+	for _, d := range domains {
+		rrs = append(rrs, &dns.CNAME{
+			Hdr:    dns.RR_Header{Name: d + "." + rpzZone, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
+			Target: ".",
+		})
+	}
+	return rrs
 }
 
 // startFakeRPZ builds a fake master and returns it with the host:port clients dial.
@@ -254,8 +332,8 @@ func TestRPZSlaveFullTransferFillsSource(t *testing.T) {
 	}
 }
 
-// When the upstream serial is unchanged, the sync is a no-op: it must not rewrite content
-// or bump the sync time again.
+// When the upstream serial is unchanged, the sync only checks the SOA: no transfer runs and
+// content stays, but last_sync_at advances so the interval gate holds until the next check.
 func TestRPZSlaveSkipsUnchangedSerial(t *testing.T) {
 	s, pool := newProfileSvc(t)
 	master := startFakeRPZ(t)
@@ -271,16 +349,25 @@ func TestRPZSlaveSkipsUnchangedSerial(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Second sync with the same upstream serial: transferRPZ still runs but nothing changes.
+	// Second sync with the same upstream serial: SOA only, no AXFR/IXFR.
+	hits := master.axfrHit
 	up = loadUpstream(t, s, upID)
 	if err := s.rpzSyncUpstream(context.Background(), up, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(context.Background(), "SELECT last_sync_at::text FROM rpz_upstreams WHERE id = $1", upID).Scan(&lastSync2); err != nil {
+	if master.axfrHit != hits || master.ixfrSeen != nil {
+		t.Fatalf("unchanged serial transferred: axfr %d -> %d, ixfr %v", hits, master.axfrHit, master.ixfrSeen)
+	}
+	var content string
+	if err := pool.QueryRow(context.Background(), `SELECT u.last_sync_at::text, s.content FROM rpz_upstreams u
+		JOIN blocklist_sources s ON s.id = u.source_id WHERE u.id = $1`, upID).Scan(&lastSync2, &content); err != nil {
 		t.Fatal(err)
 	}
-	if lastSync1 == nil || lastSync2 == nil || *lastSync1 != *lastSync2 {
-		t.Fatalf("last_sync_at moved on an unchanged serial: %v -> %v", lastSync1, lastSync2)
+	if lastSync1 == nil || lastSync2 == nil || *lastSync2 <= *lastSync1 {
+		t.Fatalf("last_sync_at did not advance on an unchanged serial: %v -> %v", lastSync1, lastSync2)
+	}
+	if content != "keep.example\n" {
+		t.Fatalf("content changed on an unchanged serial: %q", content)
 	}
 }
 
@@ -319,6 +406,41 @@ func TestRPZSlaveIncrementalUpdate(t *testing.T) {
 	}
 	if !strings.Contains(content, "new.example") || !strings.Contains(content, "old.example") {
 		t.Fatalf("content after update = %q", content)
+	}
+}
+
+// A real RFC 1995 delta (SOA(new), SOA(old), deletions, SOA(new), additions, SOA(new)),
+// here chained over two serial steps, is applied onto the stored set: removed domains go,
+// added ones come, untouched ones stay, and no full AXFR is pulled.
+func TestRPZSlaveAppliesIXFRDelta(t *testing.T) {
+	s, pool := newProfileSvc(t)
+	master := startFakeRPZ(t)
+	master.set(10, "keep.example", "gone.example", "flip.example")
+	_, upID := insertUpstream(t, s, master, false)
+	if err := s.rpzSyncUpstream(context.Background(), loadUpstream(t, s, upID), true); err != nil {
+		t.Fatal(err)
+	}
+	axfrs := master.axfrHit
+
+	// Two versions behind: 10 -> 11 drops gone+flip and adds new; 11 -> 12 re-adds flip.
+	master.set(11, "keep.example", "new.example")
+	master.set(12, "keep.example", "new.example", "flip.example")
+	if err := s.rpzSyncUpstream(context.Background(), loadUpstream(t, s, upID), true); err != nil {
+		t.Fatal(err)
+	}
+	if master.deltaHit != 1 || master.axfrHit != axfrs {
+		t.Fatalf("want one delta IXFR and no AXFR: delta=%d axfr %d -> %d", master.deltaHit, axfrs, master.axfrHit)
+	}
+	var content string
+	var serial uint32
+	var total int
+	if err := pool.QueryRow(context.Background(), `SELECT s.content, u.serial, u.total_domains
+		FROM blocklist_sources s JOIN rpz_upstreams u ON u.source_id = s.id WHERE u.id = $1`,
+		upID).Scan(&content, &serial, &total); err != nil {
+		t.Fatal(err)
+	}
+	if want := "flip.example\nkeep.example\nnew.example\n"; content != want || serial != 12 || total != 3 {
+		t.Fatalf("after delta: serial=%d total=%d content=%q, want serial=12 total=3 content=%q", serial, total, content, want)
 	}
 }
 
